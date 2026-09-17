@@ -22,14 +22,32 @@ with a key mounted from a Kubernetes Secret, and loads the model.
 ```
 common/crypto_utils.py       AES-256-GCM encrypt/decrypt helpers shared by both sides
 producer/encrypt_and_push.py Downloads the model, encrypts it, pushes to the Hub, saves the key
+producer/Dockerfile          Container image for the producer (a one-shot job, not a k8s workload)
 consumer/decrypt_and_load.py Downloads the ciphertext, decrypts with the mounted key, loads the model
 consumer/Dockerfile          Container image for the consumer pod
 k8s/secret.example.yaml      Documents the Secret shape (not a real secret)
 k8s/consumer-pod.yaml        Pod that mounts the Secret and runs the consumer
 scripts/create_k8s_secret.sh Creates the Secret from the key file the producer wrote
+scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
 tests/test_crypto_utils.py   Local round-trip + tamper-detection test for the crypto helpers
 ```
+
+## Prerequisites
+
+- **Producer** (runs locally or as a one-shot container, not in the
+  cluster): Python 3.11+ and `pip install -r producer/requirements.txt`,
+  or Docker to build/run `producer/Dockerfile` instead. A Hugging Face
+  account and a `HF_TOKEN` with write access to the destination repo
+  (create one at https://huggingface.co/settings/tokens).
+- **Consumer**: Docker to build `consumer/Dockerfile`, and a Kubernetes
+  cluster (`kubectl` configured against it — any conformant cluster works
+  for Layer 1: kind, minikube, EKS/GKE/AKS, etc.). If you're using a local
+  kind/minikube cluster, `scripts/build_consumer_image.sh` will load the
+  image into it automatically; otherwise push the image to a registry your
+  cluster can pull from and update `image:` in `k8s/consumer-pod.yaml`.
+- Python 3.11+ locally if you want to run the offline test suite
+  (`pip install pytest` in addition to the producer requirements).
 
 ## How it works
 
@@ -67,28 +85,36 @@ Secrets in the namespace, and consider a proper secrets manager (Vault,
 cloud KMS-backed Secrets, sealed-secrets, etc.) in place of plain
 `kubectl create secret` for anything beyond a demo.
 
-## Usage
-
-### 0. Install dependencies
-
-```bash
-pip install -r producer/requirements.txt   # for the producer, run locally
-```
+## Build and deploy the full pipeline
 
 ### 1. Producer: encrypt and publish
 
+Either run it directly:
+
 ```bash
+pip install -r producer/requirements.txt
 export HF_TOKEN=hf_...   # needs write access to the destination repo
 python producer/encrypt_and_push.py \
   --model-id prajjwal1/bert-tiny \
   --push-repo-id <your-hf-username>/bert-tiny-encrypted
 ```
 
-This downloads the model, archives + encrypts it, uploads
+or build and run it as a container:
+
+```bash
+scripts/build_producer_image.sh confidential-model-producer:latest
+docker run --rm -e HF_TOKEN=hf_... \
+  -v "$(pwd)/secrets:/app/secrets" -v "$(pwd)/keys:/app/keys" \
+  confidential-model-producer:latest \
+  --push-repo-id <your-hf-username>/bert-tiny-encrypted
+```
+
+Either way, this downloads the model, archives + encrypts it, uploads
 `model.tar.gz.enc` and `manifest.json` to the Hub repo, and writes the
-base64 decryption key to `secrets/decryption-key.b64` (git-ignored). Pass
-`--skip-push` to exercise the download/encrypt steps without needing a Hub
-token (e.g. for local testing).
+base64 decryption key to `secrets/decryption-key.b64` (git-ignored; with
+the container form, the volume mount is what gets it back onto the host).
+Pass `--skip-push` to exercise the download/encrypt steps without needing
+a Hub token (e.g. for local testing).
 
 ### 2. Store the key as a Kubernetes Secret
 
@@ -97,7 +123,8 @@ scripts/create_k8s_secret.sh secrets/decryption-key.b64 model-decryption-key def
 ```
 
 (This just wraps `kubectl create secret generic ... --from-file=key=...`;
-see the script for the raw command.)
+see the script for the raw command, or apply `k8s/secret.example.yaml`
+after filling in a real key if you'd rather manage it declaratively.)
 
 ### 3. Build the consumer image and deploy the pod
 
@@ -114,27 +141,45 @@ kubectl apply -f k8s/consumer-pod.yaml
 kubectl logs -f pod/confidential-model-consumer
 ```
 
-Expected tail of the logs:
+## Verifying Layer 1 works
 
-```
-[consumer] loaded decryption key from mounted Kubernetes Secret
-[consumer] downloading encrypted artifact from '<repo>' ...
-[consumer] ciphertext checksum verified against manifest
-[consumer] decrypting ... 
-[consumer] loading model from ... 
-[consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
-[consumer] done: model decrypted and loaded successfully
-```
+1. **Offline, no Hub token or cluster needed** — exercise the AES-GCM
+   helpers directly:
 
-## Testing without a Hub token or a cluster
+   ```bash
+   python -m pytest tests/ -q
+   ```
 
-The crypto helpers (`common/crypto_utils.py`) can be exercised fully
-offline:
+   `tests/test_crypto_utils.py` round-trips a random payload through
+   `encrypt_bytes`/`decrypt_bytes` and confirms that a flipped ciphertext
+   byte or a wrong key raises `InvalidTag` instead of silently returning
+   corrupted data — i.e. tampering and wrong-key use are both detected.
 
-```bash
-python -m pytest tests/ -q
-```
+2. **End to end** — after `kubectl apply -f k8s/consumer-pod.yaml`, tail
+   the logs:
 
-This round-trips a random payload through `encrypt_bytes`/`decrypt_bytes`
-and confirms that a flipped ciphertext byte or wrong key raises
-`InvalidTag` instead of silently returning corrupted data.
+   ```bash
+   kubectl logs -f pod/confidential-model-consumer
+   ```
+
+   A working Layer 1 deployment prints, in order:
+
+   ```
+   [consumer] loaded decryption key from mounted Kubernetes Secret
+   [consumer] downloading encrypted artifact from '<repo>' ...
+   [consumer] ciphertext checksum verified against manifest
+   [consumer] decrypting ...
+   [consumer] loading model from ...
+   [consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
+   [consumer] done: model decrypted and loaded successfully
+   ```
+
+   and the pod ends in `Completed` (`kubectl get pod
+   confidential-model-consumer`), confirming the key never left the
+   cluster/Secret store and the model only appeared in plaintext inside
+   the pod after a checksum-verified decrypt.
+
+3. **Negative test (the Secret actually matters)** — delete the Secret
+   (`kubectl delete secret model-decryption-key`) and re-run the pod; it
+   should fail fast with the `FileNotFoundError` from `load_key` rather
+   than silently proceeding, showing the consumer really depends on it.
