@@ -38,6 +38,7 @@ Hub repo that carries the artifact + signature — see [Threat model
 common/crypto_utils.py         AES-256-GCM encrypt/decrypt helpers shared by both sides
 common/signing_utils.py        Ed25519 sign/verify + PEM key helpers shared by both sides
 producer/encrypt_and_push.py   Downloads the model, encrypts + signs it, pushes to the Hub, saves the keys
+producer/Dockerfile            Container image for the producer (a one-shot job, not a k8s workload)
 consumer/decrypt_and_load.py   Downloads the artifact, verifies the signature, decrypts, loads the model
 consumer/Dockerfile            Container image for the consumer pod
 k8s/secret.example.yaml        Documents the Secret shape (not a real secret)
@@ -45,10 +46,28 @@ k8s/configmap.example.yaml     Documents the ConfigMap shape for the signing pub
 k8s/consumer-pod.yaml          Pod that mounts the Secret + ConfigMap and runs the consumer
 scripts/create_k8s_secret.sh   Creates the Secret from the key file the producer wrote
 scripts/create_k8s_configmap.sh  Creates the ConfigMap from the public key file the producer wrote
+scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
 tests/test_crypto_utils.py     Round-trip + tamper-detection tests for the AES-GCM helpers
 tests/test_signing_utils.py    Round-trip + tamper/wrong-key-detection tests for the signing helpers
 ```
+
+## Prerequisites
+
+- **Producer** (runs locally or as a one-shot container, not in the
+  cluster): Python 3.11+ and `pip install -r producer/requirements.txt`,
+  or Docker to build/run `producer/Dockerfile` instead. A Hugging Face
+  account and a `HF_TOKEN` with write access to the destination repo
+  (create one at https://huggingface.co/settings/tokens).
+- **Consumer**: Docker to build `consumer/Dockerfile`, and a Kubernetes
+  cluster (`kubectl` configured against it — any conformant cluster works
+  for Layers 1–2: kind, minikube, EKS/GKE/AKS, etc.). If you're using a
+  local kind/minikube cluster, `scripts/build_consumer_image.sh` will load
+  the image into it automatically; otherwise push the image to a registry
+  your cluster can pull from and update `image:` in
+  `k8s/consumer-pod.yaml`.
+- Python 3.11+ locally if you want to run the offline test suite
+  (`pip install pytest` in addition to the producer requirements).
 
 ## How it works
 
@@ -116,27 +135,35 @@ against anyone who can read the cluster's Secrets/ConfigMaps or exec into
 the pod, and there's no revocation mechanism — rotating the signing key
 means updating the ConfigMap out of band.
 
-## Usage
-
-### 0. Install dependencies
-
-```bash
-pip install -r producer/requirements.txt   # for the producer, run locally
-```
+## Build and deploy the full pipeline
 
 ### 1. Producer: encrypt, sign, and publish
 
+Either run it directly:
+
 ```bash
+pip install -r producer/requirements.txt
 export HF_TOKEN=hf_...   # needs write access to the destination repo
 python producer/encrypt_and_push.py \
   --model-id prajjwal1/bert-tiny \
   --push-repo-id <your-hf-username>/bert-tiny-encrypted
 ```
 
-This downloads the model, archives + encrypts it, signs the encrypted
-artifact with an Ed25519 key, uploads `model.tar.gz.enc`,
+or build and run it as a container:
+
+```bash
+scripts/build_producer_image.sh confidential-model-producer:latest
+docker run --rm -e HF_TOKEN=hf_... \
+  -v "$(pwd)/secrets:/app/secrets" -v "$(pwd)/keys:/app/keys" \
+  confidential-model-producer:latest \
+  --push-repo-id <your-hf-username>/bert-tiny-encrypted
+```
+
+Either way, this downloads the model, archives + encrypts it, signs the
+encrypted artifact with an Ed25519 key, uploads `model.tar.gz.enc`,
 `model.tar.gz.enc.sig`, and `manifest.json` to the Hub repo, and writes
-locally (all git-ignored):
+locally (all git-ignored; with the container form, the volume mounts are
+what get these back onto the host):
 
 - `secrets/decryption-key.b64` — the AES-256-GCM decryption key
 - `secrets/signing-key.pem` — the Ed25519 private signing key (reused on
@@ -159,7 +186,9 @@ scripts/create_k8s_configmap.sh keys/signing-public-key.pem model-signing-public
 ```
 
 (Both scripts just wrap `kubectl create secret/configmap ... --from-file=...`;
-see the scripts for the raw commands.)
+see the scripts for the raw commands, or apply `k8s/secret.example.yaml` /
+`k8s/configmap.example.yaml` after filling in real values if you'd rather
+manage them declaratively.)
 
 ### 4. Build the consumer image and deploy the pod
 
@@ -176,34 +205,69 @@ kubectl apply -f k8s/consumer-pod.yaml
 kubectl logs -f pod/confidential-model-consumer
 ```
 
-Expected tail of the logs:
+## Verifying each layer works
 
-```
-[consumer] loaded decryption key from mounted Kubernetes Secret
-[consumer] loaded trusted signing public key from mounted Kubernetes ConfigMap
-[consumer] downloading encrypted artifact from '<repo>' ...
-[consumer] ciphertext checksum verified against manifest
-[consumer] Ed25519 signature verified against the trusted public key
-[consumer] decrypting ...
-[consumer] loading model from ...
-[consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
-[consumer] done: model decrypted and loaded successfully
-```
+1. **Offline, no Hub token or cluster needed** — exercise the crypto and
+   signing helpers directly:
 
-If the artifact was tampered with, or the public key doesn't match the
-signer, the consumer raises `InvalidSignature` and exits non-zero
-**before** touching the decryption key or the plaintext model.
+   ```bash
+   python -m pytest tests/ -q
+   ```
 
-## Testing without a Hub token or a cluster
+   `tests/test_crypto_utils.py` round-trips a random payload through
+   AES-GCM and confirms a flipped ciphertext byte or wrong key raises
+   `InvalidTag`. `tests/test_signing_utils.py` round-trips a payload
+   through Ed25519 sign/verify and confirms a flipped byte, a wrong
+   signing key, or a mismatched public key all raise `InvalidSignature`.
 
-The crypto and signing helpers (`common/crypto_utils.py`,
-`common/signing_utils.py`) can be exercised fully offline:
+2. **Layer 1, end to end** — after `kubectl apply -f k8s/consumer-pod.yaml`,
+   tail the logs (`kubectl logs -f pod/confidential-model-consumer`); a
+   working deployment prints, in order:
 
-```bash
-python -m pytest tests/ -q
-```
+   ```
+   [consumer] loaded decryption key from mounted Kubernetes Secret
+   [consumer] loaded trusted signing public key from mounted Kubernetes ConfigMap
+   [consumer] downloading encrypted artifact from '<repo>' ...
+   [consumer] ciphertext checksum verified against manifest
+   [consumer] Ed25519 signature verified against the trusted public key
+   [consumer] decrypting ...
+   [consumer] loading model from ...
+   [consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
+   [consumer] done: model decrypted and loaded successfully
+   ```
 
-This round-trips payloads through AES-GCM and Ed25519 and confirms that a
-flipped byte, a wrong key, or a mismatched public key all raise the
-expected exception (`InvalidTag` / `InvalidSignature`) instead of silently
-returning or accepting corrupted data.
+   and the pod ends in `Completed` (`kubectl get pod
+   confidential-model-consumer`). Deleting the Secret
+   (`kubectl delete secret model-decryption-key`) and re-running the pod
+   should fail fast with `FileNotFoundError` from `load_key`, confirming
+   the consumer really depends on it rather than silently proceeding.
+
+3. **Layer 2, positive case** — the `Ed25519 signature verified` line
+   above is the signature check succeeding; it only prints if
+   `verify_signature` didn't raise.
+
+4. **Layer 2, negative case (the check actually matters)** — after step 1
+   of the pipeline, corrupt the published artifact and confirm the
+   consumer refuses to decrypt it rather than silently accepting a
+   tampered model:
+
+   ```bash
+   # download the artifact the producer just pushed, flip a byte, re-upload it
+   python - <<'PY'
+   from huggingface_hub import hf_hub_download, HfApi
+   path = hf_hub_download(repo_id="<your-hf-username>/bert-tiny-encrypted", filename="model.tar.gz.enc")
+   data = bytearray(open(path, "rb").read())
+   data[-1] ^= 0xFF
+   open(path, "wb").write(data)
+   HfApi().upload_file(path_or_fileobj=path, path_in_repo="model.tar.gz.enc",
+                        repo_id="<your-hf-username>/bert-tiny-encrypted")
+   PY
+   kubectl delete pod confidential-model-consumer --ignore-not-found
+   kubectl apply -f k8s/consumer-pod.yaml
+   kubectl logs -f pod/confidential-model-consumer
+   ```
+
+   The consumer should print `signature verification FAILED ... Aborting
+   before decryption` and exit non-zero — it never reaches the decrypt
+   step on a tampered artifact. Re-run the producer afterward to restore a
+   validly signed artifact.
