@@ -3,13 +3,19 @@
 A confidential model delivery pipeline: a **producer** encrypts and signs
 an open model and publishes the artifacts to the Hugging Face Hub; a
 **consumer** running as a Kubernetes pod pulls them, verifies the
-signature, decrypts with a key mounted from a Kubernetes Secret, and loads
-the model.
+signature, obtains the decryption key, and loads the model.
 
 - **Layer 1 (required)**: encrypted distribution — AES-256-GCM, key via
   Kubernetes Secret.
 - **Layer 2 (optional)**: model signing & verification — Ed25519, public
   key via Kubernetes ConfigMap, verified *before* decryption.
+- **Layer 3 (optional, this branch)**: attested key release — the
+  Kubernetes Secret is replaced with a Kata/Confidential-Containers (CoCo)
+  guest fetching the key from Trustee KBS through the in-guest Confidential
+  Data Hub (CDH), only after the guest has passed remote attestation. The
+  consumer no longer trusts the host for key delivery. Layers 2 and 3 are
+  independent and compose: the consumer still verifies the signature
+  before decrypting, whichever way it got the key.
 
 ```
  producer                                Hugging Face Hub                     consumer (k8s pod)
@@ -17,37 +23,49 @@ the model.
 │ download model  │ ──────────────────▶│ model.tar.gz.enc     │ ───────────▶│ verify signature (abort  │
 │ (bert-tiny)     │                     │ model.tar.gz.enc.sig │             │  on failure) → decrypt   │
 └────────────────┘                     │ manifest.json        │             │  → load w/ transformers  │
-        │                              └──────────────────────┘             └──────────┬───────┬───────┘
-        │ decryption key (b64, 32B)                                                    │       │
-        ▼                                                                              │       │
-  kubectl create secret ──────────────────────▶ Kubernetes Secret ─────────────────────┘       │
-        │                                        (model-decryption-key)                          │
-        │ signing public key (PEM)                                                                │
-        ▼                                                                                         │
-  kubectl create configmap ────────────────────▶ Kubernetes ConfigMap ───────────────────────────┘
-                                                  (model-signing-public-key)
+        │                              └──────────────────────┘             └───┬─────┬─────┬─────────┘
+        │ signing public key (PEM)                                              │     │     │
+        ▼                                                                       │     │     │
+  kubectl create configmap ──────────────▶ Kubernetes ConfigMap ────────────────┘     │     │
+                                            (model-signing-public-key)                 │     │
+        │ decryption key (b64, 32B)                                                   │     │
+        │                                                                             │     │
+        ├── Layer 1 ──▶ kubectl create secret ──▶ Kubernetes Secret ──────────────────┘     │
+        │                                          (model-decryption-key, mounted)           │
+        │                                                                                    │
+        └── Layer 3 ──▶ kbs-client set-resource ──▶ Trustee KBS ◀── attested fetch ──────────┘
+                                                          ▲             (guest-local CDH
+                                                          │              127.0.0.1:8006,
+                                                   resource policy         only after the
+                                                  (kbs/resource-policy.rego)  Kata/CoCo guest
+                                                                              attests)
 ```
-
-Note the public key reaches the consumer via the ConfigMap, **not** via the
-Hub repo that carries the artifact + signature — see [Threat model
-(Layer 2)](#threat-model-layer-2) for why that separation matters.
 
 ## Layout
 
 ```
-common/crypto_utils.py         AES-256-GCM encrypt/decrypt helpers shared by both sides
-common/signing_utils.py        Ed25519 sign/verify + PEM key helpers shared by both sides
-producer/encrypt_and_push.py   Downloads the model, encrypts + signs it, pushes to the Hub, saves the keys
-consumer/decrypt_and_load.py   Downloads the artifact, verifies the signature, decrypts, loads the model
-consumer/Dockerfile            Container image for the consumer pod
-k8s/secret.example.yaml        Documents the Secret shape (not a real secret)
-k8s/configmap.example.yaml     Documents the ConfigMap shape for the signing public key
-k8s/consumer-pod.yaml          Pod that mounts the Secret + ConfigMap and runs the consumer
-scripts/create_k8s_secret.sh   Creates the Secret from the key file the producer wrote
-scripts/create_k8s_configmap.sh  Creates the ConfigMap from the public key file the producer wrote
+common/crypto_utils.py           AES-256-GCM encrypt/decrypt helpers shared by both sides
+common/signing_utils.py          Ed25519 sign/verify + PEM key helpers shared by both sides
+producer/encrypt_and_push.py     Downloads the model, encrypts + signs it, pushes to the Hub, saves the keys
+consumer/decrypt_and_load.py     Downloads the artifact; verifies the signature; gets the decryption
+                                  key via Secret (L1) or attested KBS/CDH fetch (L3); decrypts and loads
+consumer/Dockerfile              Container image for the consumer pod
+k8s/secret.example.yaml          Documents the Secret shape (Layer 1, not a real secret)
+k8s/configmap.example.yaml       Documents the ConfigMap shape for the signing public key (Layer 2)
+k8s/consumer-pod.yaml            Pod that mounts the Secret + ConfigMap and runs the consumer (L1+L2)
+k8s/consumer-pod-coco.yaml       Pod using runtimeClassName kata-qemu-coco-dev + attested KBS/CDH key
+                                  fetch instead of a Secret, still mounting the signing ConfigMap (L2+L3)
+kbs/resource-policy.rego         Permissive KBS resource policy for sample TEE attestation (L3)
+scripts/create_k8s_secret.sh     Creates the Secret from the key file the producer wrote (L1)
+scripts/create_k8s_configmap.sh  Creates the ConfigMap from the public key file the producer wrote (L2)
+scripts/deploy_coco_kbs.sh       Installs the CoCo operator + Trustee KBS, sets up the
+                                  kata-qemu-coco-dev runtime class (L3)
+scripts/set_kbs_resource_policy.sh  Uploads kbs/resource-policy.rego to KBS (L3)
+scripts/push_key_to_kbs.sh       Pushes the decryption key into KBS via kbs-client set-resource (L3)
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
-tests/test_crypto_utils.py     Round-trip + tamper-detection tests for the AES-GCM helpers
-tests/test_signing_utils.py    Round-trip + tamper/wrong-key-detection tests for the signing helpers
+tests/test_crypto_utils.py       Round-trip + tamper-detection tests for the AES-GCM helpers
+tests/test_signing_utils.py      Round-trip + tamper/wrong-key-detection tests for the signing helpers
+tests/test_kbs_fetch.py          Local test of the CDH fetch path against a mock HTTP server (L3)
 ```
 
 ## How it works
@@ -70,21 +88,42 @@ tests/test_signing_utils.py    Round-trip + tamper/wrong-key-detection tests for
   public `manifest.json` (model id, algorithm, SHA-256 of plaintext and
   ciphertext, signature filename, signing algorithm — no secrets) are
   pushed to a Hub repo. The decryption key and the signing private key are
-  **never** uploaded anywhere.
-- **Key delivery**: the decryption key and signing private key only ever
-  touch local disk (under the git-ignored `secrets/` directory) and the
-  Kubernetes Secret store. The consumer pod mounts the decryption-key
-  Secret as a read-only file (`defaultMode: 0440`) rather than as an env
-  var, so it doesn't leak into process listings or crash logs as easily.
+  **never** uploaded to the Hub.
+- **Key delivery — Layer 1**: the key only ever touches local disk (under
+  the git-ignored `secrets/` directory) and the Kubernetes Secret store.
+  The consumer pod mounts the Secret as a read-only file
+  (`defaultMode: 0440`) rather than as an env var, so it doesn't leak into
+  process listings or crash logs as easily.
+- **Key delivery — Layer 3**: instead of a Secret, the producer pushes the
+  key into Trustee KBS as a resource (`scripts/push_key_to_kbs.sh`, via
+  `kbs-client set-resource`) under a path like `default/key/my-model`. The
+  consumer pod runs under the `kata-qemu-coco-dev` RuntimeClass so its
+  containers execute inside a Kata/CoCo confidential VM instead of a plain
+  container. That guest's attestation agent is configured via the pod
+  annotation `io.katacontainers.config.agent.aa_kbc_params` to attest
+  against KBS; once attestation succeeds, the guest-local Confidential
+  Data Hub (CDH) — reachable only from inside the VM at
+  `127.0.0.1:8006/cdh/resource/...` — proxies resource fetches to KBS. The
+  consumer just does an HTTP GET to that local address
+  (`fetch_key_from_kbs` in `consumer/decrypt_and_load.py`); if attestation
+  never happened or failed the KBS resource policy, CDH never returns the
+  key and the fetch fails loudly. The host and kubelet are never in the
+  key-delivery path at all in this mode. Setting `KBS_RESOURCE_PATH`
+  switches the consumer from the Layer 1 Secret-file path to this fetch —
+  everything else about the pipeline is unchanged.
 - **Public key delivery**: the signing public key isn't secret, but it's
   still delivered to the consumer via a Kubernetes ConfigMap — a channel
   independent of the Hub repo — rather than being fetched from the Hub
-  alongside the artifact. See the threat model below.
+  alongside the artifact. See the Layer 2 threat model below. This is
+  orthogonal to Layer 3: `k8s/consumer-pod-coco.yaml` mounts the same
+  ConfigMap even though the decryption key itself no longer comes from a
+  Secret.
 - **Consumer**: downloads the artifact + signature + manifest, checks the
   ciphertext's SHA-256 against the manifest, then **verifies the Ed25519
   signature against the trusted public key and aborts before any
   decryption is attempted if verification fails**. Only after that does it
-  decrypt, extract, and load the model with
+  obtain the decryption key (Secret or attested KBS/CDH fetch), decrypt,
+  extract, and load the model with
   `transformers.AutoModel`/`AutoTokenizer`, running one forward pass as a
   sanity check.
 
@@ -93,12 +132,12 @@ tests/test_signing_utils.py    Round-trip + tamper/wrong-key-detection tests for
 This layer protects the model **at rest on the Hub and in transit** — the
 Hub only ever sees ciphertext. It does *not* protect the model from
 whoever can read the Kubernetes Secret or attach to the consumer pod
-(no attestation, no confidential-computing enclave, no KMS/HSM — that's
-out of scope for this layer). Treat the decryption key with the same care
-as any other cluster secret: RBAC-restrict who can `get`/`describe`
-Secrets in the namespace, and consider a proper secrets manager (Vault,
-cloud KMS-backed Secrets, sealed-secrets, etc.) in place of plain
-`kubectl create secret` for anything beyond a demo.
+(no attestation, no confidential-computing enclave, no KMS/HSM). Treat the
+decryption key with the same care as any other cluster secret:
+RBAC-restrict who can `get`/`describe` Secrets in the namespace, and
+consider a proper secrets manager (Vault, cloud KMS-backed Secrets,
+sealed-secrets, etc.) in place of plain `kubectl create secret` for
+anything beyond a demo.
 
 ### Threat model (Layer 2)
 
@@ -115,6 +154,40 @@ local output, not via the Hub. It still doesn't provide confidentiality
 against anyone who can read the cluster's Secrets/ConfigMaps or exec into
 the pod, and there's no revocation mechanism — rotating the signing key
 means updating the ConfigMap out of band.
+
+### Threat model (Layer 3)
+
+Layer 3 removes the host/kubelet from the key-delivery trust boundary:
+the key sits in KBS, gated by a resource policy, and is only released to
+a guest that has proven — via TEE evidence from inside a Kata/CoCo VM —
+that it matches what the policy expects. A cluster operator with kubectl
+access to the node can no longer just `kubectl get secret` the key; they'd
+have to compromise the guest itself or the attestation chain. Combined
+with Layer 2, a tampered or unsigned artifact is caught by signature
+verification even if it somehow got decrypted, and a non-attested consumer
+never gets the key to decrypt anything in the first place — the two checks
+are independent and don't substitute for each other.
+
+Caveats specific to this implementation:
+- **This is dev/sample-attester mode**, per the task scope ("Confidential
+  Containers in development mode", "permissive resource policy ...
+  allowing key release to sample TEE attestation"). `kbs/resource-policy.rego`
+  allows release to any guest that produced *some* verified attestation
+  claim — it does not pin specific measurements, SVNs, or a real hardware
+  TEE. On real hardware (SEV-SNP, TDX, etc.) you'd tighten the policy to
+  check those claims; the wiring (KBS, CDH, the runtime class, the
+  annotation) stays the same.
+- **KBS/kbs-client versions differ.** The exact `kbs-client` subcommands
+  and the CoCo operator/Trustee manifest layout used by
+  `scripts/deploy_coco_kbs.sh`, `scripts/push_key_to_kbs.sh`, and
+  `scripts/set_kbs_resource_policy.sh` move between releases; the scripts
+  are commented accordingly and point at the upstream repos to confirm
+  against.
+- Trustee KBS's own admin access (who can push resources / set policy) is
+  itself a trust root — protect `KBS_AUTH_PRIVATE_KEY` at least as
+  carefully as the Layer 1 decryption key.
+- The signing private key still only ever touches local disk and is never
+  attested over — Layer 3 attests the *consumer*, not the producer.
 
 ## Usage
 
@@ -144,42 +217,62 @@ locally (all git-ignored):
 - `keys/signing-public-key.pem` — the Ed25519 public key, for the consumer
 
 Pass `--skip-push` to exercise the download/encrypt/sign steps without
-needing a Hub token (e.g. for local testing).
+needing a Hub token (e.g. for local testing). The script prints both
+decryption-key delivery options (Secret vs. KBS) at the end.
 
-### 2. Store the decryption key as a Kubernetes Secret
-
-```bash
-scripts/create_k8s_secret.sh secrets/decryption-key.b64 model-decryption-key default
-```
-
-### 3. Store the signing public key as a Kubernetes ConfigMap
+### 2. Distribute the signing public key (Layer 2, needed either way)
 
 ```bash
 scripts/create_k8s_configmap.sh keys/signing-public-key.pem model-signing-public-key default
 ```
 
-(Both scripts just wrap `kubectl create secret/configmap ... --from-file=...`;
-see the scripts for the raw commands.)
+### 3a. Layer 1: store the decryption key as a Kubernetes Secret
 
-### 4. Build the consumer image and deploy the pod
+```bash
+scripts/create_k8s_secret.sh secrets/decryption-key.b64 model-decryption-key default
+```
+
+Then build the image, edit `HF_REPO_ID`/`HF_MODEL_ID` in
+`k8s/consumer-pod.yaml`, and:
 
 ```bash
 scripts/build_consumer_image.sh confidential-model-consumer:latest
-```
-
-Edit `k8s/consumer-pod.yaml`: set `HF_REPO_ID` to the repo you pushed to in
-step 1 and `HF_MODEL_ID` to the same `--model-id` you used (it must match —
-it's the AES-GCM AAD). Then:
-
-```bash
 kubectl apply -f k8s/consumer-pod.yaml
 kubectl logs -f pod/confidential-model-consumer
 ```
 
-Expected tail of the logs:
+### 3b. Layer 3: attested key release via Kata+CoCo/KBS instead
+
+```bash
+# One-time cluster setup: CoCo operator + Trustee KBS + kata-qemu-coco-dev
+# runtime class. Requires a cluster whose nodes support Kata containers.
+scripts/deploy_coco_kbs.sh
+
+# Point these at the KBS the previous step deployed (see its printed
+# "Next steps" for how to find them).
+export KBS_URL=http://kbs.confidential-containers-system.svc.cluster.local:8080
+export KBS_AUTH_PRIVATE_KEY=./kbs/kbs-admin.key
+
+scripts/set_kbs_resource_policy.sh kbs/resource-policy.rego
+scripts/push_key_to_kbs.sh secrets/decryption-key.b64 default/key/my-model
+```
+
+Edit `k8s/consumer-pod-coco.yaml`: set `HF_REPO_ID`/`HF_MODEL_ID` as above,
+`KBS_RESOURCE_PATH` to match what you pushed to (`default/key/my-model`),
+and the `io.katacontainers.config.agent.aa_kbc_params` annotation to your
+`KBS_URL`. Then:
+
+```bash
+scripts/build_consumer_image.sh confidential-model-consumer:latest
+kubectl apply -f k8s/consumer-pod-coco.yaml
+kubectl logs -f pod/confidential-model-consumer-coco
+```
+
+Expected tail of the logs (Layer 3, combined with Layer 2):
 
 ```
-[consumer] loaded decryption key from mounted Kubernetes Secret
+[consumer] fetching decryption key from CDH (attested KBS release): http://127.0.0.1:8006/cdh/resource/default/key/my-model
+[consumer] obtained decryption key via attested KBS release (Layer 3)
 [consumer] loaded trusted signing public key from mounted Kubernetes ConfigMap
 [consumer] downloading encrypted artifact from '<repo>' ...
 [consumer] ciphertext checksum verified against manifest
@@ -190,20 +283,31 @@ Expected tail of the logs:
 [consumer] done: model decrypted and loaded successfully
 ```
 
-If the artifact was tampered with, or the public key doesn't match the
-signer, the consumer raises `InvalidSignature` and exits non-zero
-**before** touching the decryption key or the plaintext model.
+If attestation fails or the KBS resource policy denies release, the CDH
+fetch fails and `fetch_key_from_kbs` raises before any decryption is
+attempted. If the artifact was tampered with or wasn't signed by the
+trusted key, `verify_signature` raises instead — either failure aborts
+before decryption, independently of the other.
 
 ## Testing without a Hub token or a cluster
 
-The crypto and signing helpers (`common/crypto_utils.py`,
-`common/signing_utils.py`) can be exercised fully offline:
+The crypto, signing, and Layer 3 CDH fetch helpers can all be exercised
+fully offline:
 
 ```bash
 python -m pytest tests/ -q
 ```
 
-This round-trips payloads through AES-GCM and Ed25519 and confirms that a
-flipped byte, a wrong key, or a mismatched public key all raise the
-expected exception (`InvalidTag` / `InvalidSignature`) instead of silently
-returning or accepting corrupted data.
+- `test_crypto_utils.py` round-trips a random payload through
+  `encrypt_bytes`/`decrypt_bytes` and confirms that a flipped ciphertext
+  byte or wrong key raises `InvalidTag` instead of silently returning
+  corrupted data.
+- `test_signing_utils.py` round-trips a payload through Ed25519
+  sign/verify and confirms tampering, a wrong key, or a wrong signature
+  all raise `InvalidSignature`.
+- `test_kbs_fetch.py` spins up a local `http.server` shaped like the CDH
+  resource API and verifies `fetch_key_from_kbs` round-trips a key
+  correctly and raises clearly on a missing resource or an unreachable
+  CDH endpoint — the real Kata/CoCo/KBS stack isn't available in most dev
+  sandboxes, but the HTTP contract the consumer relies on is still fully
+  testable.

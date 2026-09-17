@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """Consumer side of the confidential model delivery pipeline.
 
-Runs inside a Kubernetes pod that has the decryption key mounted from a
-Kubernetes Secret and the signing public key mounted from a Kubernetes
-ConfigMap (see k8s/consumer-pod.yaml). It:
+Runs inside a Kubernetes pod that has the signing public key mounted from
+a Kubernetes ConfigMap, and obtains the decryption key one of two ways:
 
-1. Reads the decryption key from the mounted Secret volume and the
-   signing public key from the mounted ConfigMap volume.
+1. **Layer 1 (default)**: from a Kubernetes Secret mounted as a file (see
+   k8s/consumer-pod.yaml). The host/kubelet controls delivery; the
+   consumer trusts whoever populated the Secret.
+2. **Layer 3 (attested key release)**: fetched from Trustee KBS through
+   the in-guest Confidential Data Hub (CDH) API, which only releases the
+   resource after the pod's Kata/CoCo guest has passed remote attestation
+   (see k8s/consumer-pod-coco.yaml, kbs/, scripts/deploy_coco_kbs.sh,
+   scripts/push_key_to_kbs.sh). The consumer never trusts the host for key
+   delivery in this mode — set KBS_RESOURCE_PATH to switch to it.
+
+Either way, it then:
+
+1. Obtains the decryption key (Secret file, or attested KBS/CDH fetch) and
+   the signing public key (ConfigMap).
 2. Downloads the encrypted artifact + signature + manifest from the
    Hugging Face Hub.
 3. Verifies the ciphertext checksum against the manifest.
@@ -20,22 +31,34 @@ ConfigMap (see k8s/consumer-pod.yaml). It:
 Configuration is via environment variables so the same image can be reused
 across models/repos without rebuilding:
 
-    HF_REPO_ID              Hub repo holding the encrypted artifact (required)
-    HF_REPO_TYPE            "model" or "dataset" (default: model)
-    HF_MODEL_ID             Original model id, used as AES-GCM AAD (required,
-                             must match what the producer used)
-    HF_TOKEN                Hugging Face token, only needed if HF_REPO_ID is private
-    DECRYPTION_KEY_PATH     Path to the mounted secret key file
-                            (default: /etc/secrets/decryption-key/key)
-    SIGNING_PUBLIC_KEY_PATH Path to the mounted ConfigMap public key file
-                            (default: /etc/keys/signing-public-key/public-key.pem)
-    WORK_DIR                Scratch directory (default: /tmp/confidential-model)
+    HF_REPO_ID               Hub repo holding the encrypted artifact (required)
+    HF_REPO_TYPE              "model" or "dataset" (default: model)
+    HF_MODEL_ID               Original model id, used as AES-GCM AAD (required,
+                              must match what the producer used)
+    HF_TOKEN                  Hugging Face token, only needed if HF_REPO_ID is private
+    SIGNING_PUBLIC_KEY_PATH   Path to the mounted ConfigMap public key file
+                              (default: /etc/keys/signing-public-key/public-key.pem)
+    WORK_DIR                  Scratch directory (default: /tmp/confidential-model)
+
+    # Layer 1 key delivery (used when KBS_RESOURCE_PATH is unset):
+    DECRYPTION_KEY_PATH       Path to the mounted secret key file
+                              (default: /etc/secrets/decryption-key/key)
+
+    # Layer 3 key delivery (attested release via KBS/CDH):
+    KBS_RESOURCE_PATH         KBS resource path the producer pushed the key
+                              to, e.g. default/key/my-model. Setting this
+                              switches key delivery to the CDH fetch below
+                              and DECRYPTION_KEY_PATH is ignored.
+    CDH_RESOURCE_URL_BASE     Base URL of the in-guest CDH resource API
+                              (default: http://127.0.0.1:8006/cdh/resource)
 """
 from __future__ import annotations
 
 import os
 import sys
 import tarfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,9 +67,11 @@ from common import crypto_utils, signing_utils  # noqa: E402
 ENCRYPTED_ARTIFACT_NAME = "model.tar.gz.enc"
 SIGNATURE_NAME = ENCRYPTED_ARTIFACT_NAME + ".sig"
 MANIFEST_NAME = "manifest.json"
+DEFAULT_CDH_RESOURCE_URL_BASE = "http://127.0.0.1:8006/cdh/resource"
 
 
 def load_key(key_path: str) -> bytes:
+    """Layer 1: read the key from a Kubernetes Secret mounted as a file."""
     path = Path(key_path)
     if not path.exists():
         raise FileNotFoundError(
@@ -54,6 +79,32 @@ def load_key(key_path: str) -> bytes:
             "mounted correctly? See k8s/consumer-pod.yaml."
         )
     return crypto_utils.key_from_b64(path.read_text())
+
+
+def fetch_key_from_kbs(resource_path: str, cdh_base_url: str = DEFAULT_CDH_RESOURCE_URL_BASE) -> bytes:
+    """Layer 3: fetch the key from Trustee KBS via the in-guest CDH API.
+
+    The CDH sidecar (part of the Kata/CoCo guest, reachable only from
+    inside the confidential VM at 127.0.0.1) proxies this request to KBS
+    after driving the full attestation handshake with the attestation
+    agent. If the guest's TEE evidence doesn't satisfy the KBS resource
+    policy, CDH never returns the key and this call fails — the consumer
+    never sees a key it hasn't been attested for, and the host has no
+    part in releasing it.
+    """
+    url = f"{cdh_base_url.rstrip('/')}/{resource_path.lstrip('/')}"
+    print(f"[consumer] fetching decryption key from CDH (attested KBS release): {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            body = resp.read()
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"failed to fetch key resource '{resource_path}' from CDH at {cdh_base_url}: {exc}. "
+            "Is this pod running under the kata-qemu-coco-dev runtime class with "
+            "agent.aa_kbc_params configured, and does the KBS resource policy allow release "
+            "to this attestation? See k8s/consumer-pod-coco.yaml and kbs/resource-policy.rego."
+        ) from exc
+    return crypto_utils.key_from_b64(body.decode("utf-8"))
 
 
 def load_trusted_public_key(public_key_path: str) -> signing_utils.Ed25519PublicKey:
@@ -149,13 +200,19 @@ def main() -> None:
     if not model_id:
         raise SystemExit("HF_MODEL_ID environment variable is required (must match the producer's --model-id)")
 
-    key_path = os.environ.get("DECRYPTION_KEY_PATH", "/etc/secrets/decryption-key/key")
     public_key_path = os.environ.get("SIGNING_PUBLIC_KEY_PATH", "/etc/keys/signing-public-key/public-key.pem")
     work_dir = Path(os.environ.get("WORK_DIR", "/tmp/confidential-model"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    key = load_key(key_path)
-    print("[consumer] loaded decryption key from mounted Kubernetes Secret")
+    kbs_resource_path = os.environ.get("KBS_RESOURCE_PATH")
+    if kbs_resource_path:
+        cdh_base_url = os.environ.get("CDH_RESOURCE_URL_BASE", DEFAULT_CDH_RESOURCE_URL_BASE)
+        key = fetch_key_from_kbs(kbs_resource_path, cdh_base_url)
+        print("[consumer] obtained decryption key via attested KBS release (Layer 3)")
+    else:
+        key_path = os.environ.get("DECRYPTION_KEY_PATH", "/etc/secrets/decryption-key/key")
+        key = load_key(key_path)
+        print("[consumer] loaded decryption key from mounted Kubernetes Secret (Layer 1)")
 
     public_key = load_trusted_public_key(public_key_path)
     print("[consumer] loaded trusted signing public key from mounted Kubernetes ConfigMap")
