@@ -37,6 +37,7 @@ key, and loads the model.
 ```
 common/crypto_utils.py           AES-256-GCM encrypt/decrypt helpers shared by both sides
 producer/encrypt_and_push.py     Downloads the model, encrypts it, pushes to the Hub, saves the key
+producer/Dockerfile              Container image for the producer (a one-shot job, not a k8s workload)
 consumer/decrypt_and_load.py     Downloads the ciphertext; gets the key via Secret (L1) or attested
                                   KBS/CDH fetch (L3); decrypts and loads the model
 consumer/Dockerfile              Container image for the consumer pod
@@ -50,10 +51,37 @@ scripts/deploy_coco_kbs.sh       Installs the CoCo operator + Trustee KBS, sets 
                                   kata-qemu-coco-dev runtime class (L3)
 scripts/set_kbs_resource_policy.sh  Uploads kbs/resource-policy.rego to KBS (L3)
 scripts/push_key_to_kbs.sh       Pushes the decryption key into KBS via kbs-client set-resource (L3)
+scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
 tests/test_crypto_utils.py       Local round-trip + tamper-detection test for the crypto helpers
 tests/test_kbs_fetch.py          Local test of the CDH fetch path against a mock HTTP server (L3)
 ```
+
+## Prerequisites
+
+- **Producer** (runs locally or as a one-shot container, not in the
+  cluster): Python 3.11+ and `pip install -r producer/requirements.txt`,
+  or Docker to build/run `producer/Dockerfile` instead. A Hugging Face
+  account and a `HF_TOKEN` with write access to the destination repo
+  (create one at https://huggingface.co/settings/tokens).
+- **Consumer — Layer 1 only**: Docker to build `consumer/Dockerfile`, and
+  any conformant Kubernetes cluster (`kubectl` configured against it: kind,
+  minikube, EKS/GKE/AKS, etc.).
+- **Consumer — Layer 3**: additionally requires a cluster whose nodes
+  support Kata Containers (bare-metal or nested-virtualization-capable
+  nodes — Kata needs to launch real QEMU VMs, which most managed
+  Kubernetes node pools and plain `kind`/`minikube` don't support out of
+  the box), the [`kbs-client`](https://github.com/confidential-containers/trustee)
+  CLI built locally to push the key and set the resource policy, and
+  cluster-admin access to install the CoCo operator and Trustee KBS
+  (`scripts/deploy_coco_kbs.sh`).
+- If you're using a local kind/minikube cluster for Layer 1,
+  `scripts/build_consumer_image.sh` will load the image into it
+  automatically; otherwise (and always for Layer 3, since it needs a
+  Kata-capable cluster) push the image to a registry your cluster can pull
+  from and update `image:` in the relevant pod manifest.
+- Python 3.11+ locally if you want to run the offline test suite
+  (`pip install pytest` in addition to the producer requirements).
 
 ## How it works
 
@@ -136,29 +164,37 @@ Caveats specific to this implementation:
   itself a trust root — protect `KBS_AUTH_PRIVATE_KEY` at least as
   carefully as the Layer 1 decryption key.
 
-## Usage
-
-### 0. Install dependencies
-
-```bash
-pip install -r producer/requirements.txt   # for the producer, run locally
-```
+## Build and deploy the full pipeline
 
 ### 1. Producer: encrypt and publish
 
+Either run it directly:
+
 ```bash
+pip install -r producer/requirements.txt
 export HF_TOKEN=hf_...   # needs write access to the destination repo
 python producer/encrypt_and_push.py \
   --model-id prajjwal1/bert-tiny \
   --push-repo-id <your-hf-username>/bert-tiny-encrypted
 ```
 
-This downloads the model, archives + encrypts it, uploads
+or build and run it as a container:
+
+```bash
+scripts/build_producer_image.sh confidential-model-producer:latest
+docker run --rm -e HF_TOKEN=hf_... \
+  -v "$(pwd)/secrets:/app/secrets" \
+  confidential-model-producer:latest \
+  --push-repo-id <your-hf-username>/bert-tiny-encrypted
+```
+
+Either way, this downloads the model, archives + encrypts it, uploads
 `model.tar.gz.enc` and `manifest.json` to the Hub repo, and writes the
-base64 decryption key to `secrets/decryption-key.b64` (git-ignored). Pass
-`--skip-push` to exercise the download/encrypt steps without needing a Hub
-token (e.g. for local testing). The script prints both delivery options
-(Secret vs. KBS) at the end.
+base64 decryption key to `secrets/decryption-key.b64` (git-ignored; with
+the container form, the volume mount is what gets it back onto the host).
+Pass `--skip-push` to exercise the download/encrypt steps without needing
+a Hub token (e.g. for local testing). The script prints both delivery
+options (Secret vs. KBS) at the end.
 
 ### 2a. Layer 1: store the key as a Kubernetes Secret
 
@@ -202,39 +238,75 @@ kubectl apply -f k8s/consumer-pod-coco.yaml
 kubectl logs -f pod/confidential-model-consumer-coco
 ```
 
-Expected tail of the logs (Layer 3):
+## Verifying each layer works
 
-```
-[consumer] fetching decryption key from CDH (attested KBS release): http://127.0.0.1:8006/cdh/resource/default/key/my-model
-[consumer] obtained decryption key via attested KBS release (Layer 3)
-[consumer] downloading encrypted artifact from '<repo>' ...
-[consumer] ciphertext checksum verified against manifest
-[consumer] decrypting ...
-[consumer] loading model from ...
-[consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
-[consumer] done: model decrypted and loaded successfully
-```
+1. **Offline, no Hub token or cluster needed** — exercise the crypto
+   helpers and the Layer 3 CDH fetch contract directly:
 
-If attestation fails or the KBS resource policy denies release, the CDH
-fetch fails and `fetch_key_from_kbs` raises before any decryption is
-attempted — see its docstring in `consumer/decrypt_and_load.py`.
+   ```bash
+   python -m pytest tests/ -q
+   ```
 
-## Testing without a Hub token or a cluster
+   - `test_crypto_utils.py` round-trips a random payload through
+     `encrypt_bytes`/`decrypt_bytes` and confirms a flipped ciphertext
+     byte or wrong key raises `InvalidTag` instead of silently returning
+     corrupted data.
+   - `test_kbs_fetch.py` spins up a local `http.server` shaped like the
+     CDH resource API and verifies `fetch_key_from_kbs` round-trips a key
+     correctly and raises clearly on a missing resource or an unreachable
+     CDH endpoint — useful when a real Kata/CoCo/KBS stack isn't at hand,
+     since it still exercises the exact HTTP contract the consumer relies
+     on.
 
-The crypto helpers and the Layer 3 CDH fetch path can be exercised fully
-offline:
+2. **Layer 1, end to end** — after `kubectl apply -f k8s/consumer-pod.yaml`,
+   tail the logs (`kubectl logs -f pod/confidential-model-consumer`); a
+   working deployment prints, in order:
 
-```bash
-python -m pytest tests/ -q
-```
+   ```
+   [consumer] loaded decryption key from mounted Kubernetes Secret (Layer 1)
+   [consumer] downloading encrypted artifact from '<repo>' ...
+   [consumer] ciphertext checksum verified against manifest
+   [consumer] decrypting ...
+   [consumer] loading model from ...
+   [consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
+   [consumer] done: model decrypted and loaded successfully
+   ```
 
-- `test_crypto_utils.py` round-trips a random payload through
-  `encrypt_bytes`/`decrypt_bytes` and confirms that a flipped ciphertext
-  byte or wrong key raises `InvalidTag` instead of silently returning
-  corrupted data.
-- `test_kbs_fetch.py` spins up a local `http.server` shaped like the CDH
-  resource API and verifies `fetch_key_from_kbs` round-trips a key
-  correctly and raises clearly on a missing resource or an unreachable
-  CDH endpoint — the real Kata/CoCo/KBS stack isn't available in most dev
-  sandboxes, but the HTTP contract the consumer relies on is still fully
-  testable.
+   and the pod ends in `Completed`. Deleting the Secret
+   (`kubectl delete secret model-decryption-key`) and re-running the pod
+   should fail fast with `FileNotFoundError` from `load_key`, confirming
+   the consumer really depends on it.
+
+3. **Layer 3, end to end** — after `kubectl apply -f k8s/consumer-pod-coco.yaml`,
+   tail the logs (`kubectl logs -f pod/confidential-model-consumer-coco`);
+   a working deployment prints:
+
+   ```
+   [consumer] fetching decryption key from CDH (attested KBS release): http://127.0.0.1:8006/cdh/resource/default/key/my-model
+   [consumer] obtained decryption key via attested KBS release (Layer 3)
+   [consumer] downloading encrypted artifact from '<repo>' ...
+   [consumer] ciphertext checksum verified against manifest
+   [consumer] decrypting ...
+   [consumer] loading model from ...
+   [consumer] loaded model OK, last_hidden_state shape=(1, N, 128)
+   [consumer] done: model decrypted and loaded successfully
+   ```
+
+   confirming the key came from the attested CDH fetch, not a mounted
+   Secret (`k8s/consumer-pod-coco.yaml` mounts no decryption-key Secret at
+   all — `kubectl describe pod confidential-model-consumer-coco` should
+   show no such volume).
+
+4. **Layer 3, negative case (attestation actually gates the key)** —
+   remove the guest's ability to reach KBS/CDH and confirm the fetch fails
+   rather than the consumer falling back to some other source. The
+   simplest version: apply `k8s/consumer-pod-coco.yaml` *without*
+   `runtimeClassName: kata-qemu-coco-dev` (i.e. as a plain container) —
+   there's no CDH sidecar at `127.0.0.1:8006` in a non-Kata pod, so
+   `fetch_key_from_kbs` should raise `RuntimeError: failed to fetch key
+   resource ...` and the pod should end in `Error`/`CrashLoopBackOff`
+   instead of silently succeeding. (On a real Kata/CoCo cluster, an
+   equivalent test is tightening `kbs/resource-policy.rego` to `default
+   allow = false` with no matching rule, re-uploading it with
+   `scripts/set_kbs_resource_policy.sh`, and confirming the same pod that
+   worked before now fails the CDH fetch.)
