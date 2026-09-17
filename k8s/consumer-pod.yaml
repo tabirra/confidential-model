@@ -1,0 +1,41 @@
+# Consumer workload: mounts the decryption key from the Kubernetes Secret
+# created by scripts/create_k8s_secret.sh, downloads the encrypted model
+# artifact from the Hugging Face Hub, decrypts it, and loads it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: confidential-model-consumer
+  labels:
+    app: confidential-model-consumer
+spec:
+  restartPolicy: Never
+  containers:
+    - name: consumer
+      image: confidential-model-consumer:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: HF_REPO_ID
+          value: "<your-hf-username>/bert-tiny-encrypted"
+        - name: HF_REPO_TYPE
+          value: "model"
+        - name: HF_MODEL_ID
+          value: "prajjwal1/bert-tiny"
+        - name: DECRYPTION_KEY_PATH
+          value: "/etc/secrets/decryption-key/key"
+        # Only needed if HF_REPO_ID is a private repo.
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-hub-token
+              key: token
+              optional: true
+      volumeMounts:
+        - name: decryption-key
+          mountPath: /etc/secrets/decryption-key
+          readOnly: true
+  volumes:
+    - name: decryption-key
+      secret:
+        secretName: model-decryption-key
+        # Restrict access: only the container's UID/GID can read it.
+        defaultMode: 0440

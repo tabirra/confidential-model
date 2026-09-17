@@ -1,0 +1,4 @@
+huggingface_hub>=0.24
+cryptography>=41
+transformers>=4.40
+torch>=2.2

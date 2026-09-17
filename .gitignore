@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets and generated artifacts — never commit these
+secrets/
+*.b64
+*.tar.gz
+*.tar.gz.enc
+/tmp-confidential-model/
