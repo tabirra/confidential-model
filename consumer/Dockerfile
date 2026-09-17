@@ -11,6 +11,7 @@ COPY consumer/decrypt_and_load.py /app/consumer/decrypt_and_load.py
 
 # Defaults; override via the Pod/Deployment env in k8s/consumer-pod.yaml
 ENV DECRYPTION_KEY_PATH=/etc/secrets/decryption-key/key \
+    SIGNING_PUBLIC_KEY_PATH=/etc/keys/signing-public-key/public-key.pem \
     WORK_DIR=/tmp/confidential-model \
     HF_REPO_TYPE=model
 

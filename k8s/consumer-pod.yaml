@@ -1,6 +1,9 @@
 # Consumer workload: mounts the decryption key from the Kubernetes Secret
-# created by scripts/create_k8s_secret.sh, downloads the encrypted model
-# artifact from the Hugging Face Hub, decrypts it, and loads it.
+# created by scripts/create_k8s_secret.sh, and the trusted signing public
+# key from the Kubernetes ConfigMap created by
+# scripts/create_k8s_configmap.sh. Downloads the encrypted model artifact
+# + signature from the Hugging Face Hub, verifies the signature (aborting
+# on failure), decrypts, and loads the model.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -22,6 +25,8 @@ spec:
           value: "prajjwal1/bert-tiny"
         - name: DECRYPTION_KEY_PATH
           value: "/etc/secrets/decryption-key/key"
+        - name: SIGNING_PUBLIC_KEY_PATH
+          value: "/etc/keys/signing-public-key/public-key.pem"
         # Only needed if HF_REPO_ID is a private repo.
         - name: HF_TOKEN
           valueFrom:
@@ -33,9 +38,17 @@ spec:
         - name: decryption-key
           mountPath: /etc/secrets/decryption-key
           readOnly: true
+        - name: signing-public-key
+          mountPath: /etc/keys/signing-public-key
+          readOnly: true
   volumes:
     - name: decryption-key
       secret:
         secretName: model-decryption-key
         # Restrict access: only the container's UID/GID can read it.
         defaultMode: 0440
+    - name: signing-public-key
+      configMap:
+        name: model-signing-public-key
+        # Not secret data, but still read-only in the container.
+        defaultMode: 0444

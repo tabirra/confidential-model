@@ -6,7 +6,10 @@ venv/
 
 # Secrets and generated artifacts — never commit these
 secrets/
+keys/
 *.b64
+*.pem
+*.sig
 *.tar.gz
 *.tar.gz.enc
 /tmp-confidential-model/

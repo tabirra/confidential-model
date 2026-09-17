@@ -3,13 +3,18 @@
 
 1. Download a small open model from the Hugging Face Hub.
 2. Archive it and encrypt the archive with AES-256-GCM.
-3. Push the encrypted artifact (+ a public, non-secret manifest) to a
-   Hugging Face Hub repo.
-4. Print the commands needed to store the decryption key as a Kubernetes
-   Secret for the consumer workload to mount.
+3. Sign the encrypted artifact with an Ed25519 private key (Layer 2).
+4. Push the encrypted artifact + signature (+ a public, non-secret
+   manifest) to a Hugging Face Hub repo.
+5. Print the commands needed to store the decryption key as a Kubernetes
+   Secret and the signing public key as a Kubernetes ConfigMap, for the
+   consumer workload to mount.
 
-The decryption key itself is never uploaded anywhere; it only ever touches
-local disk (git-ignored) and the Kubernetes Secret store.
+The decryption key and the signing private key are never uploaded
+anywhere; they only ever touch local disk (git-ignored) and the
+Kubernetes Secret store. The signing public key is not secret — it's
+published locally for distribution via a ConfigMap (see
+k8s/configmap.example.yaml) through a channel independent of the Hub.
 
 Usage:
     export HF_TOKEN=hf_...                     # needs write access to --push-repo-id
@@ -29,11 +34,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import crypto_utils  # noqa: E402
+from common import crypto_utils, signing_utils  # noqa: E402
 
 ENCRYPTED_ARTIFACT_NAME = "model.tar.gz.enc"
+SIGNATURE_NAME = ENCRYPTED_ARTIFACT_NAME + ".sig"
 MANIFEST_NAME = "manifest.json"
 ALGORITHM = "AES-256-GCM"
+SIGNING_ALGORITHM = "Ed25519"
 
 
 def download_model(model_id: str, dest_dir: Path) -> Path:
@@ -49,6 +56,22 @@ def archive_model(model_dir: Path, out_tar: Path) -> None:
     print(f"[producer] archiving {model_dir} -> {out_tar}")
     with tarfile.open(out_tar, "w:gz") as tar:
         tar.add(model_dir, arcname=model_dir.name)
+
+
+def get_or_create_signing_key(private_key_path: Path, public_key_path: Path) -> signing_utils.Ed25519PrivateKey:
+    if private_key_path.exists():
+        print(f"[producer] reusing existing signing key at {private_key_path}")
+        signing_key = signing_utils.load_private_key(str(private_key_path))
+    else:
+        print(f"[producer] generating new Ed25519 signing key -> {private_key_path}")
+        signing_key = signing_utils.generate_signing_key()
+        private_key_path.parent.mkdir(parents=True, exist_ok=True)
+        signing_utils.save_private_key(signing_key, str(private_key_path))
+        os.chmod(private_key_path, 0o600)
+
+    public_key_path.parent.mkdir(parents=True, exist_ok=True)
+    signing_utils.save_public_key(signing_key.public_key(), str(public_key_path))
+    return signing_key
 
 
 def push_to_hub(repo_id: str, repo_type: str, files: dict[str, Path]) -> None:
@@ -78,7 +101,12 @@ def main() -> None:
     parser.add_argument("--work-dir", default=None, help="Scratch directory (default: temp dir)")
     parser.add_argument("--key-out", default="secrets/decryption-key.b64",
                          help="Local path to save the base64 decryption key (git-ignored)")
+    parser.add_argument("--signing-key-out", default="secrets/signing-key.pem",
+                         help="Local path to save/reuse the Ed25519 private signing key (git-ignored)")
+    parser.add_argument("--signing-public-key-out", default="keys/signing-public-key.pem",
+                         help="Local path to save the Ed25519 public key, for ConfigMap distribution")
     parser.add_argument("--k8s-secret-name", default="model-decryption-key")
+    parser.add_argument("--k8s-configmap-name", default="model-signing-public-key")
     parser.add_argument("--k8s-namespace", default="default")
     parser.add_argument("--skip-push", action="store_true",
                          help="Do everything except the Hub upload (useful for local testing)")
@@ -98,12 +126,23 @@ def main() -> None:
     crypto_utils.encrypt_file(key, str(tar_path), str(enc_path), aad=aad)
     print(f"[producer] encrypted artifact written to {enc_path}")
 
+    signing_key_path = Path(args.signing_key_out)
+    public_key_path = Path(args.signing_public_key_out)
+    signing_key = get_or_create_signing_key(signing_key_path, public_key_path)
+    signature = signing_utils.sign_file(signing_key, str(enc_path))
+    sig_path = work_dir / SIGNATURE_NAME
+    sig_path.write_bytes(signature)
+    print(f"[producer] signed {enc_path} -> {sig_path}")
+
     manifest = {
         "model_id": args.model_id,
         "algorithm": ALGORITHM,
         "artifact_filename": ENCRYPTED_ARTIFACT_NAME,
         "plaintext_archive_sha256": crypto_utils.sha256_hex(str(tar_path)),
         "ciphertext_sha256": crypto_utils.sha256_hex(str(enc_path)),
+        "signature_filename": SIGNATURE_NAME,
+        "signing_algorithm": SIGNING_ALGORITHM,
+        "signing_public_key_sha256": crypto_utils.sha256_hex(str(public_key_path)),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     manifest_path = work_dir / MANIFEST_NAME
@@ -124,20 +163,30 @@ def main() -> None:
             args.repo_type,
             {
                 ENCRYPTED_ARTIFACT_NAME: enc_path,
+                SIGNATURE_NAME: sig_path,
                 MANIFEST_NAME: manifest_path,
             },
         )
-        print(f"[producer] pushed encrypted artifact + manifest to "
+        print(f"[producer] pushed encrypted artifact + signature + manifest to "
               f"https://huggingface.co/{'datasets/' if args.repo_type == 'dataset' else ''}{args.push_repo_id}")
 
     print()
-    print("[producer] next step: store the decryption key as a Kubernetes Secret, e.g.:")
+    print("[producer] next steps:")
+    print("  1. Store the decryption key as a Kubernetes Secret:")
     print(
-        f"  kubectl create secret generic {args.k8s_secret_name} \\\n"
-        f"    --namespace {args.k8s_namespace} \\\n"
-        f"    --from-file=key={key_out}"
+        f"       kubectl create secret generic {args.k8s_secret_name} \\\n"
+        f"         --namespace {args.k8s_namespace} \\\n"
+        f"         --from-file=key={key_out}"
     )
-    print("  (or run scripts/create_k8s_secret.sh, which wraps this)")
+    print("       (or run scripts/create_k8s_secret.sh, which wraps this)")
+    print("  2. Distribute the signing public key as a Kubernetes ConfigMap")
+    print("     (NOT via the Hub repo above, so a compromised Hub repo alone can't forge a trusted signer):")
+    print(
+        f"       kubectl create configmap {args.k8s_configmap_name} \\\n"
+        f"         --namespace {args.k8s_namespace} \\\n"
+        f"         --from-file=public-key.pem={public_key_path}"
+    )
+    print("       (or run scripts/create_k8s_configmap.sh, which wraps this)")
 
 
 if __name__ == "__main__":

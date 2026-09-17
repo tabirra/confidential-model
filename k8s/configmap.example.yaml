@@ -1,0 +1,26 @@
+# Example/template only.
+#
+# The signing public key isn't secret, but it must still reach the
+# consumer through a channel independent of the Hugging Face Hub repo
+# that carries the artifact + signature — otherwise an attacker who can
+# rewrite that repo could replace the artifact, signature, *and* public
+# key together, and verification would pass against a forged key.
+#
+# Prefer creating the ConfigMap imperatively from the public key file the
+# producer wrote locally (see scripts/create_k8s_configmap.sh):
+#
+#   kubectl create configmap model-signing-public-key \
+#     --namespace default \
+#     --from-file=public-key.pem=keys/signing-public-key.pem
+#
+# This file only documents the shape of the resulting ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-signing-public-key
+  namespace: default
+data:
+  public-key.pem: |
+    -----BEGIN PUBLIC KEY-----
+    <base64 Ed25519 SubjectPublicKeyInfo produced by producer/encrypt_and_push.py>
+    -----END PUBLIC KEY-----
