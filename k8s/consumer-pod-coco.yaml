@@ -1,0 +1,51 @@
+# Consumer workload using attested key release (Layer 3) instead of a
+# Kubernetes Secret for the decryption key:
+#
+# - runtimeClassName selects the kata-qemu-coco-dev runtime class
+#   installed by scripts/deploy_coco_kbs.sh, so this pod runs inside a
+#   Kata/CoCo confidential VM instead of a regular container.
+# - The io.katacontainers.config.agent.aa_kbc_params annotation tells the
+#   in-guest attestation agent which KBS to attest against and how
+#   (cc_kbc::<KBS URL>).
+# - No decryption-key Secret volume is mounted. The consumer instead
+#   fetches the key at KBS_RESOURCE_PATH from the in-guest CDH API at
+#   127.0.0.1:8006, which only responds after the guest has passed
+#   attestation against the KBS resource policy in kbs/resource-policy.rego.
+#   See consumer/decrypt_and_load.py's fetch_key_from_kbs().
+apiVersion: v1
+kind: Pod
+metadata:
+  name: confidential-model-consumer-coco
+  labels:
+    app: confidential-model-consumer-coco
+  annotations:
+    # Configures the attestation agent's key broker client. Replace the
+    # host:port with the KBS Service address from
+    # scripts/deploy_coco_kbs.sh's output.
+    io.katacontainers.config.agent.aa_kbc_params: "cc_kbc::http://kbs.confidential-containers-system.svc.cluster.local:8080"
+spec:
+  runtimeClassName: kata-qemu-coco-dev
+  restartPolicy: Never
+  containers:
+    - name: consumer
+      image: confidential-model-consumer:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: HF_REPO_ID
+          value: "<your-hf-username>/bert-tiny-encrypted"
+        - name: HF_REPO_TYPE
+          value: "model"
+        - name: HF_MODEL_ID
+          value: "prajjwal1/bert-tiny"
+        # Selects attested KBS/CDH key delivery instead of a mounted
+        # Kubernetes Secret — must match the --path used with
+        # scripts/push_key_to_kbs.sh.
+        - name: KBS_RESOURCE_PATH
+          value: "default/key/my-model"
+        # Only needed if HF_REPO_ID is a private repo.
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-hub-token
+              key: token
+              optional: true

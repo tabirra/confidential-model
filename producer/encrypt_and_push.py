@@ -131,13 +131,18 @@ def main() -> None:
               f"https://huggingface.co/{'datasets/' if args.repo_type == 'dataset' else ''}{args.push_repo_id}")
 
     print()
-    print("[producer] next step: store the decryption key as a Kubernetes Secret, e.g.:")
+    print("[producer] next step — deliver the decryption key to the consumer, either:")
+    print("  Option A (Layer 1): store it as a Kubernetes Secret:")
     print(
-        f"  kubectl create secret generic {args.k8s_secret_name} \\\n"
-        f"    --namespace {args.k8s_namespace} \\\n"
-        f"    --from-file=key={key_out}"
+        f"    kubectl create secret generic {args.k8s_secret_name} \\\n"
+        f"      --namespace {args.k8s_namespace} \\\n"
+        f"      --from-file=key={key_out}"
     )
-    print("  (or run scripts/create_k8s_secret.sh, which wraps this)")
+    print("    (or run scripts/create_k8s_secret.sh, which wraps this)")
+    print("  Option B (Layer 3): push it into Trustee KBS for attested release instead:")
+    print(f"    scripts/push_key_to_kbs.sh {key_out} default/key/my-model")
+    print("    (requires a KBS already deployed via scripts/deploy_coco_kbs.sh; "
+          "see k8s/consumer-pod-coco.yaml for the matching consumer config)")
 
 
 if __name__ == "__main__":
