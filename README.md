@@ -387,19 +387,23 @@ scripts/set_kbs_resource_policy.sh kbs/resource-policy.rego
 scripts/push_key_to_kbs.sh secrets/decryption-key.b64 default/key/my-model
 ```
 
-Edit `k8s/consumer-pod-coco.yaml`: set `HF_REPO_ID`/`HF_MODEL_ID` to the
-same values you'd pass via `HF_USERNAME`/`HF_MODEL_ID` to
-`scripts/deploy_consumer_pod.sh` above (this manifest isn't templated,
-unlike `k8s/consumer-pod.yaml`), `KBS_RESOURCE_PATH` to match what you
-pushed to (`default/key/my-model`), and the
-`io.katacontainers.config.agent.aa_kbc_params` annotation to your
-`KBS_URL`. Then:
+`k8s/consumer-pod-coco.yaml` is a template, like `k8s/consumer-pod.yaml` —
+render and apply it with `scripts/deploy_consumer_pod.sh coco` instead of
+`kubectl apply -f` directly:
 
 ```bash
 scripts/build_consumer_image.sh confidential-model-consumer:latest
-kubectl apply -f k8s/consumer-pod-coco.yaml
+HF_USERNAME=<your-hf-username> KBS_NAMESPACE=coco-tenant \
+  scripts/deploy_consumer_pod.sh coco
 kubectl logs -f pod/confidential-model-consumer-coco
 ```
+
+`KBS_NAMESPACE` must match whatever `scripts/deploy_coco_kbs.sh` printed
+for your cluster (its "Next steps" output) — it defaults to `coco-tenant`,
+not the CoCo operator's own `confidential-containers-system` namespace.
+If `KBS_RESOURCE_PATH` (in the manifest, default `default/key/my-model`)
+or `HF_MODEL_ID` need to differ from their defaults, edit the manifest or
+extend the script the same way as for Layer 1.
 
 Expected tail of the logs (Layer 3, combined with Layer 2):
 
@@ -477,10 +481,9 @@ before decryption, independently of the other.
      decryption` and exit non-zero, never reaching the decrypt step. Rerun
      the producer afterward to restore a validly signed artifact.
 
-3. **Layer 3, end to end** — after `kubectl apply -f
-   k8s/consumer-pod-coco.yaml`, tail the logs
-   (`kubectl logs -f pod/confidential-model-consumer-coco`); a working
-   deployment prints:
+3. **Layer 3, end to end** — after `scripts/deploy_consumer_pod.sh coco`,
+   tail the logs (`kubectl logs -f pod/confidential-model-consumer-coco`);
+   a working deployment prints:
 
    ```
    [consumer] fetching decryption key from CDH (attested KBS release): http://127.0.0.1:8006/cdh/resource/default/key/my-model
@@ -522,19 +525,30 @@ before decryption, independently of the other.
    aborts before decryption, independently of the other, whichever
    key-delivery mode is in use.
 
-5. **Validating the KBS/attestation half without a real Kata guest.** The
-   `kata-qemu-coco-dev` runtime needs a cluster whose nodes can actually
-   launch Kata's QEMU microVMs — real hardware, or a VM with only a
-   single level of virtualization between it and the physical CPU. In a
-   dev sandbox that's already itself a VM (so Kata's guest would be a
-   *second* nested level), `containerd-shim-kata-v2` may launch its QEMU
-   sandbox successfully (confirmed via QMP: vCPU state `running`) but
-   never manage to connect to the guest's vsock — `EHOSTUNREACH` at the
-   host-kernel level, persisting for the full dial timeout, despite the
-   exact same CID/vhost-fd handoff pattern working fine when reproduced
-   manually outside `containerd-shim-kata-v2`. If you hit this, you can
-   still validate everything except the guest boot itself directly
-   against KBS with `kbs-client` (built from
+5. **If the Kata guest never boots on a memory-constrained dev cluster.**
+   `containerd-shim-kata-v2` may launch its QEMU sandbox successfully
+   (confirmed via QMP: vCPU state `running`) but never manage to connect
+   to the guest's vsock — `EHOSTUNREACH` at the host-kernel level,
+   persisting for the full dial timeout. This turned out, in this
+   project's own testing, to be plain guest-memory exhaustion rather than
+   a fundamental limitation of nested virtualization or a specific guest
+   kernel version: Kata's default hypervisor config asks for ~4GB of
+   guest memory (`default_memory` in `configuration-qemu.toml`, plus a
+   matching NUMA memory-backend-file), and a dev cluster node (e.g. a
+   minikube profile running inside a container with a constrained cgroup)
+   may not have that much headroom free after Kubernetes' own system
+   components. The guest never gets far enough into its boot to bring up
+   the vsock-listening agent, which host-side tooling reports as a dial
+   failure rather than an obvious OOM. If you hit this, try lowering
+   `default_memory` (e.g. to `512`) in the node's
+   `configuration-qemu.toml` and retrying — the per-pod annotation
+   `io.katacontainers.config.hypervisor.default_memory` is a cleaner fix
+   *if* your build's `enable_annotations` allowlist includes
+   `default_memory`; if not, the node-level config edit is the only way to
+   test this without more cluster memory.
+
+   Independently of whether the guest boots, you can validate the
+   KBS/attestation half directly with `kbs-client` (built from
    `confidential-containers/trustee`, `tools/kbs-client`):
    ```bash
    kbs-client --url "$KBS_URL" get-resource --path default/key/my-model
