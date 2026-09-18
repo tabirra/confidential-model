@@ -17,10 +17,11 @@ published locally for distribution via a ConfigMap (see
 k8s/configmap.example.yaml) through a channel independent of the Hub.
 
 Usage:
-    export HF_TOKEN=hf_...                     # needs write access to --push-repo-id
-    python producer/encrypt_and_push.py \
-        --model-id prajjwal1/bert-tiny \
-        --push-repo-id <your-hf-username>/bert-tiny-encrypted
+    export HF_TOKEN=hf_...                      # needs write access to the destination repo
+    export HF_USERNAME=<your-hf-username>       # default owner of the destination repo
+    python producer/encrypt_and_push.py --model-id prajjwal1/bert-tiny
+
+If --push-repo-id is omitted, it defaults to "$HF_USERNAME/<model-basename>-encrypted".
 """
 from __future__ import annotations
 
@@ -94,8 +95,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", default="prajjwal1/bert-tiny",
                          help="Source model on the Hugging Face Hub (default: prajjwal1/bert-tiny)")
-    parser.add_argument("--push-repo-id", required=True,
-                         help="Destination Hub repo for the encrypted artifact, e.g. myuser/bert-tiny-encrypted")
+    parser.add_argument("--push-repo-id", default=None,
+                         help="Destination Hub repo for the encrypted artifact, e.g. myuser/bert-tiny-encrypted "
+                              "(default: $HF_USERNAME/<model-basename>-encrypted)")
     parser.add_argument("--repo-type", default="model", choices=["model", "dataset"],
                          help="Hub repo type to push the encrypted artifact to (default: model)")
     parser.add_argument("--work-dir", default=None, help="Scratch directory (default: temp dir)")
@@ -111,6 +113,14 @@ def main() -> None:
     parser.add_argument("--skip-push", action="store_true",
                          help="Do everything except the Hub upload (useful for local testing)")
     args = parser.parse_args()
+
+    if args.push_repo_id is None:
+        hf_username = os.environ.get("HF_USERNAME")
+        if not args.skip_push and not hf_username:
+            parser.error("--push-repo-id not given and HF_USERNAME is not set")
+        if hf_username:
+            model_basename = args.model_id.rstrip("/").rsplit("/", 1)[-1]
+            args.push_repo_id = f"{hf_username}/{model_basename}-encrypted"
 
     work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="confidential-model-"))
     work_dir.mkdir(parents=True, exist_ok=True)
