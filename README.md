@@ -93,24 +93,26 @@ Either run it directly:
 
 ```bash
 pip install -r producer/requirements.txt
-export HF_TOKEN=hf_...   # needs write access to the destination repo
-python producer/encrypt_and_push.py \
-  --model-id prajjwal1/bert-tiny \
-  --push-repo-id <your-hf-username>/bert-tiny-encrypted
+export HF_TOKEN=hf_...       # needs write access to the destination repo
+export HF_USERNAME=<your-hf-username>   # default owner of the destination repo
+python producer/encrypt_and_push.py --model-id prajjwal1/bert-tiny
 ```
+
+`--push-repo-id` can still be passed explicitly to override the destination
+repo; when omitted, it defaults to `$HF_USERNAME/<model-basename>-encrypted`.
 
 or build and run it as a container:
 
 ```bash
 scripts/build_producer_image.sh confidential-model-producer:latest
-docker run --rm -e HF_TOKEN=hf_... \
+docker run --rm -e HF_TOKEN=hf_... -e HF_USERNAME=<your-hf-username> \
   -v "$(pwd)/secrets:/app/secrets" -v "$(pwd)/keys:/app/keys" \
-  confidential-model-producer:latest \
-  --push-repo-id <your-hf-username>/bert-tiny-encrypted
+  confidential-model-producer:latest
 ```
 
-Instead of passing `-e HF_TOKEN=hf_...` inline, you can keep the token in a
-git-ignored `.env` file at the repo root (`HF_TOKEN=hf_...`) and pass
+Instead of passing `-e HF_TOKEN=hf_... -e HF_USERNAME=...` inline, you can
+keep both in a git-ignored `.env` file at the repo root
+(`HF_TOKEN=hf_...` and `HF_USERNAME=<your-hf-username>`) and pass
 `--env-file .env` to `docker run`. Never bake the token into the Dockerfile
 with `ENV` or commit it — it would end up baked into every image layer and
 into git history.
