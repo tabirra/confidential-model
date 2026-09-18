@@ -11,6 +11,7 @@ secrets/
 *.tar.gz.enc
 /tmp-confidential-model/
 .env
+notas.txt
 
 # KBS admin credentials (Layer 3) — never commit these
 kbs/*.key
