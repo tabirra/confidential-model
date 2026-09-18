@@ -13,3 +13,4 @@ keys/
 *.tar.gz
 *.tar.gz.enc
 /tmp-confidential-model/
+.env
