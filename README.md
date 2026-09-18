@@ -5,9 +5,9 @@ model and publishes the ciphertext to the Hugging Face Hub; a **consumer**
 running as a Kubernetes pod pulls the ciphertext, obtains the decryption
 key, and loads the model.
 
-- **Layer 1 (required)**: encrypted distribution — AES-256-GCM, key
+- **Layer 1**: encrypted distribution — AES-256-GCM, key
   delivered via a Kubernetes Secret.
-- **Layer 3 (optional, this branch)**: attested key release — the
+- **Layer 3**: attested key release — the
   Kubernetes Secret is replaced with a Kata/Confidential-Containers (CoCo)
   guest fetching the key from Trustee KBS through the in-guest Confidential
   Data Hub (CDH), only after the guest has passed remote attestation. The
