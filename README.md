@@ -43,9 +43,10 @@ consumer/decrypt_and_load.py   Downloads the artifact, verifies the signature, d
 consumer/Dockerfile            Container image for the consumer pod
 k8s/secret.example.yaml        Documents the Secret shape (not a real secret)
 k8s/configmap.example.yaml     Documents the ConfigMap shape for the signing public key
-k8s/consumer-pod.yaml          Pod that mounts the Secret + ConfigMap and runs the consumer
+k8s/consumer-pod.yaml          Pod template (${HF_REPO_ID}/${HF_MODEL_ID} placeholders) that mounts the Secret + ConfigMap and runs the consumer
 scripts/create_k8s_secret.sh   Creates the Secret from the key file the producer wrote
 scripts/create_k8s_configmap.sh  Creates the ConfigMap from the public key file the producer wrote
+scripts/deploy_consumer_pod.sh Renders k8s/consumer-pod.yaml with envsubst and applies it
 scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
 tests/test_crypto_utils.py     Round-trip + tamper-detection tests for the AES-GCM helpers
@@ -208,14 +209,20 @@ manage them declaratively.)
 scripts/build_consumer_image.sh confidential-model-consumer:latest
 ```
 
-Edit `k8s/consumer-pod.yaml`: set `HF_REPO_ID` to the repo you pushed to in
-step 1 and `HF_MODEL_ID` to the same `--model-id` you used (it must match —
-it's the AES-GCM AAD). Then:
+`k8s/consumer-pod.yaml` is a template (`${HF_REPO_ID}`/`${HF_MODEL_ID}`
+placeholders) — don't `kubectl apply` it directly. Render and deploy it with:
 
 ```bash
-kubectl apply -f k8s/consumer-pod.yaml
+HF_USERNAME=<your-hf-username> scripts/deploy_consumer_pod.sh
 kubectl logs -f pod/confidential-model-consumer
 ```
+
+`HF_MODEL_ID` defaults to `prajjwal1/bert-tiny`; override it (and it must
+match the `--model-id` used in step 1, since it's the AES-GCM AAD) with
+`HF_MODEL_ID=<model-id> HF_USERNAME=... scripts/deploy_consumer_pod.sh`, or
+set `HF_REPO_ID=<user>/<repo>` directly instead of `HF_USERNAME` if the repo
+name doesn't follow the producer's default `<model-basename>-encrypted`
+convention.
 
 ## Verifying each layer works
 
@@ -232,7 +239,7 @@ kubectl logs -f pod/confidential-model-consumer
    through Ed25519 sign/verify and confirms a flipped byte, a wrong
    signing key, or a mismatched public key all raise `InvalidSignature`.
 
-2. **Layer 1, end to end** — after `kubectl apply -f k8s/consumer-pod.yaml`,
+2. **Layer 1, end to end** — after `scripts/deploy_consumer_pod.sh`,
    tail the logs (`kubectl logs -f pod/confidential-model-consumer`); a
    working deployment prints, in order:
 
@@ -250,9 +257,13 @@ kubectl logs -f pod/confidential-model-consumer
 
    and the pod ends in `Completed` (`kubectl get pod
    confidential-model-consumer`). Deleting the Secret
-   (`kubectl delete secret model-decryption-key`) and re-running the pod
-   should fail fast with `FileNotFoundError` from `load_key`, confirming
-   the consumer really depends on it rather than silently proceeding.
+   (`kubectl delete secret model-decryption-key`) and re-running the pod:
+   in practice kubelet refuses to even start the container (`kubectl
+   describe pod` shows `FailedMount: secret "model-decryption-key" not
+   found`) since the volume can't be mounted; if the Secret existed but
+   the key file inside it didn't, you'd instead see the container start
+   and fail fast with `FileNotFoundError` from `load_key`. Either way, the
+   consumer never silently proceeds without the key.
 
 3. **Layer 2, positive case** — the `Ed25519 signature verified` line
    above is the signature check succeeding; it only prints if
@@ -275,7 +286,7 @@ kubectl logs -f pod/confidential-model-consumer
                         repo_id="<your-hf-username>/bert-tiny-encrypted")
    PY
    kubectl delete pod confidential-model-consumer --ignore-not-found
-   kubectl apply -f k8s/consumer-pod.yaml
+   HF_USERNAME=<your-hf-username> scripts/deploy_consumer_pod.sh
    kubectl logs -f pod/confidential-model-consumer
    ```
 

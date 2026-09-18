@@ -123,8 +123,25 @@ def decrypt_and_extract(key: bytes, enc_path: Path, aad: bytes, extract_dir: Pat
     return entries[0]
 
 
+def _patch_missing_model_type(model_dir: Path, default: str = "bert") -> None:
+    # Pre-2021 Hub checkpoints (e.g. the default prajjwal1/bert-tiny) predate
+    # the `model_type` field in config.json. Loading such a repo id directly
+    # from the Hub still works because the Hub API backfills model_type from
+    # repo metadata, but this consumer only ever loads from a local
+    # directory post-decrypt, where AutoConfig has nothing to fall back on.
+    import json
+
+    config_path = model_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    if "model_type" not in config:
+        config["model_type"] = default
+        config_path.write_text(json.dumps(config))
+
+
 def load_and_sanity_check(model_dir: Path) -> None:
     from transformers import AutoModel, AutoTokenizer
+
+    _patch_missing_model_type(model_dir)
 
     print(f"[consumer] loading model from {model_dir} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
