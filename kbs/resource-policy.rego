@@ -17,10 +17,12 @@
 # https://github.com/confidential-containers/trustee
 package policy
 
-default allow = false
+import rego.v1
+
+default allow := false
 
 # Release the resource once AS has attached a trustworthiness verdict to
 # the request, i.e. the guest completed remote attestation at all.
-allow {
+allow if {
 	input.submods
 }

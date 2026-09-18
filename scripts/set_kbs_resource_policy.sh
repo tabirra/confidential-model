@@ -8,13 +8,15 @@
 #
 # Usage:
 #   KBS_URL=http://<kbs-host>:8080 \
-#   KBS_AUTH_PRIVATE_KEY=./kbs/kbs-admin.key \
+#   KBS_ADMIN_TOKEN_FILE=kbs/admin-token \
 #     scripts/set_kbs_resource_policy.sh [policy-file]
+#
+# Generate KBS_ADMIN_TOKEN_FILE with scripts/generate_kbs_admin_token.sh.
 set -euo pipefail
 
 POLICY_FILE="${1:-kbs/resource-policy.rego}"
-KBS_URL="${KBS_URL:?set KBS_URL to the Trustee KBS address, e.g. http://kbs.default.svc.cluster.local:8080}"
-KBS_AUTH_PRIVATE_KEY="${KBS_AUTH_PRIVATE_KEY:?set KBS_AUTH_PRIVATE_KEY to the KBS admin private key path}"
+KBS_URL="${KBS_URL:?set KBS_URL to the Trustee KBS address, e.g. http://kbs.coco-tenant.svc.cluster.local:8080}"
+KBS_ADMIN_TOKEN_FILE="${KBS_ADMIN_TOKEN_FILE:?set KBS_ADMIN_TOKEN_FILE to a token from scripts/generate_kbs_admin_token.sh}"
 
 if [[ ! -f "$POLICY_FILE" ]]; then
   echo "error: policy file not found at $POLICY_FILE" >&2
@@ -23,13 +25,13 @@ fi
 
 if ! command -v kbs-client >/dev/null 2>&1; then
   echo "error: kbs-client not found on PATH" >&2
-  echo "build it from https://github.com/confidential-containers/trustee" >&2
+  echo "build it from https://github.com/confidential-containers/trustee (tools/kbs-client)" >&2
   exit 1
 fi
 
 echo "uploading $POLICY_FILE as the KBS resource policy at $KBS_URL"
-kbs-client --url "$KBS_URL" config --auth-private-key "$KBS_AUTH_PRIVATE_KEY"
-kbs-client --url "$KBS_URL" set-resource-policy --policy-file "$POLICY_FILE"
+kbs-client --url "$KBS_URL" config --admin-token-file "$KBS_ADMIN_TOKEN_FILE" \
+  set-resource-policy --policy-file "$POLICY_FILE"
 
 echo "done."
 echo "note: exact kbs-client subcommand flags vary by Trustee version — run 'kbs-client --help' to confirm against what you have installed."
