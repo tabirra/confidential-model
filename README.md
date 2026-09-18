@@ -53,12 +53,13 @@ consumer/decrypt_and_load.py     Downloads the artifact; verifies the signature;
 consumer/Dockerfile              Container image for the consumer pod
 k8s/secret.example.yaml          Documents the Secret shape (Layer 1, not a real secret)
 k8s/configmap.example.yaml       Documents the ConfigMap shape for the signing public key (Layer 2)
-k8s/consumer-pod.yaml            Pod that mounts the Secret + ConfigMap and runs the consumer (L1+L2)
+k8s/consumer-pod.yaml            Pod template (${HF_REPO_ID}/${HF_MODEL_ID} placeholders) that mounts the Secret + ConfigMap and runs the consumer (L1+L2)
 k8s/consumer-pod-coco.yaml       Pod using runtimeClassName kata-qemu-coco-dev + attested KBS/CDH key
                                   fetch instead of a Secret, still mounting the signing ConfigMap (L2+L3)
 kbs/resource-policy.rego         Permissive KBS resource policy for sample TEE attestation (L3)
 scripts/create_k8s_secret.sh     Creates the Secret from the key file the producer wrote (L1)
 scripts/create_k8s_configmap.sh  Creates the ConfigMap from the public key file the producer wrote (L2)
+scripts/deploy_consumer_pod.sh   Renders k8s/consumer-pod.yaml with envsubst and applies it (L1+L2)
 scripts/deploy_coco_kbs.sh       Installs the CoCo operator + Trustee KBS, sets up the
                                   kata-qemu-coco-dev runtime class (L3)
 scripts/set_kbs_resource_policy.sh  Uploads kbs/resource-policy.rego to KBS (L3)
@@ -280,14 +281,22 @@ scripts/create_k8s_configmap.sh keys/signing-public-key.pem model-signing-public
 scripts/create_k8s_secret.sh secrets/decryption-key.b64 model-decryption-key default
 ```
 
-Then build the image, edit `HF_REPO_ID`/`HF_MODEL_ID` in
-`k8s/consumer-pod.yaml`, and:
+Then build the image and deploy. `k8s/consumer-pod.yaml` is a template
+(`${HF_REPO_ID}`/`${HF_MODEL_ID}` placeholders) — don't `kubectl apply` it
+directly, render it with `scripts/deploy_consumer_pod.sh`:
 
 ```bash
 scripts/build_consumer_image.sh confidential-model-consumer:latest
-kubectl apply -f k8s/consumer-pod.yaml
+HF_USERNAME=<your-hf-username> scripts/deploy_consumer_pod.sh
 kubectl logs -f pod/confidential-model-consumer
 ```
+
+`HF_MODEL_ID` defaults to `prajjwal1/bert-tiny`; override it (and it must
+match the `--model-id` used in step 1) with `HF_MODEL_ID=<model-id>
+HF_USERNAME=... scripts/deploy_consumer_pod.sh`, or set
+`HF_REPO_ID=<user>/<repo>` directly instead of `HF_USERNAME` if the repo
+name doesn't follow the producer's default `<model-basename>-encrypted`
+convention.
 
 ### 3b. Layer 3: attested key release via Kata+CoCo/KBS instead
 
@@ -305,9 +314,12 @@ scripts/set_kbs_resource_policy.sh kbs/resource-policy.rego
 scripts/push_key_to_kbs.sh secrets/decryption-key.b64 default/key/my-model
 ```
 
-Edit `k8s/consumer-pod-coco.yaml`: set `HF_REPO_ID`/`HF_MODEL_ID` as above,
-`KBS_RESOURCE_PATH` to match what you pushed to (`default/key/my-model`),
-and the `io.katacontainers.config.agent.aa_kbc_params` annotation to your
+Edit `k8s/consumer-pod-coco.yaml`: set `HF_REPO_ID`/`HF_MODEL_ID` to the
+same values you'd pass via `HF_USERNAME`/`HF_MODEL_ID` to
+`scripts/deploy_consumer_pod.sh` above (this manifest isn't templated,
+unlike `k8s/consumer-pod.yaml`), `KBS_RESOURCE_PATH` to match what you
+pushed to (`default/key/my-model`), and the
+`io.katacontainers.config.agent.aa_kbc_params` annotation to your
 `KBS_URL`. Then:
 
 ```bash
@@ -360,8 +372,8 @@ before decryption, independently of the other.
      since it still exercises the exact HTTP contract the consumer relies
      on.
 
-2. **Layer 1 + 2, end to end** — after `kubectl apply -f
-   k8s/consumer-pod.yaml`, tail the logs
+2. **Layer 1 + 2, end to end** — after `scripts/deploy_consumer_pod.sh`,
+   tail the logs
    (`kubectl logs -f pod/confidential-model-consumer`); a working
    deployment prints, in order:
 
@@ -380,8 +392,12 @@ before decryption, independently of the other.
    and the pod ends in `Completed`. Two negative tests confirm the checks
    actually gate things rather than just logging:
    - **Layer 1**: `kubectl delete secret model-decryption-key`, then
-     re-run the pod — it should fail fast with `FileNotFoundError` from
-     `load_key`.
+     re-run the pod. In practice kubelet refuses to even start the
+     container (`kubectl describe pod` shows `FailedMount: secret
+     "model-decryption-key" not found`) since the volume can't be
+     mounted; if the Secret existed but the key file inside it didn't,
+     you'd instead see the container start and fail fast with
+     `FileNotFoundError` from `load_key`.
    - **Layer 2**: download the artifact the producer just pushed, flip a
      byte, re-upload it to the same Hub repo path, then re-run the pod —
      it should print `signature verification FAILED ... Aborting before
