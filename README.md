@@ -109,6 +109,12 @@ docker run --rm -e HF_TOKEN=hf_... \
   --push-repo-id <your-hf-username>/bert-tiny-encrypted
 ```
 
+Instead of passing `-e HF_TOKEN=hf_...` inline, you can keep the token in a
+git-ignored `.env` file at the repo root (`HF_TOKEN=hf_...`) and pass
+`--env-file .env` to `docker run`. Never bake the token into the Dockerfile
+with `ENV` or commit it — it would end up baked into every image layer and
+into git history.
+
 Either way, this downloads the model, archives + encrypts it, uploads
 `model.tar.gz.enc` and `manifest.json` to the Hub repo, and writes the
 base64 decryption key to `secrets/decryption-key.b64` (git-ignored; with
