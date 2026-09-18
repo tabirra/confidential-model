@@ -31,6 +31,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import crypto_utils  # noqa: E402
 
@@ -78,7 +80,16 @@ def verify_manifest(enc_path: Path, manifest_path: Path) -> dict:
 def decrypt_and_extract(key: bytes, enc_path: Path, aad: bytes, extract_dir: Path) -> Path:
     tar_path = enc_path.with_suffix("")  # strip .enc -> model.tar.gz
     print(f"[consumer] decrypting {enc_path} -> {tar_path}")
-    crypto_utils.decrypt_file(key, str(enc_path), str(tar_path), aad=aad)
+    try:
+        crypto_utils.decrypt_file(key, str(enc_path), str(tar_path), aad=aad)
+    except InvalidTag as exc:
+        raise ValueError(
+            "decryption FAILED: the mounted key does not match this ciphertext "
+            "(wrong key, or the model id doesn't match the AAD used at encrypt "
+            "time). If the producer was re-run since this key was delivered, "
+            "re-run scripts/create_k8s_secret.sh with the new "
+            "secrets/decryption-key.b64 and redeploy."
+        ) from exc
 
     print(f"[consumer] extracting {tar_path} -> {extract_dir}")
     with tarfile.open(tar_path, "r:gz") as tar:
