@@ -12,6 +12,10 @@
 #   127.0.0.1:8006, which only responds after the guest has passed
 #   attestation against the KBS resource policy in kbs/resource-policy.rego.
 #   See consumer/decrypt_and_load.py's fetch_key_from_kbs().
+#
+# ${HF_REPO_ID} and ${KBS_NAMESPACE} are substituted by
+# scripts/deploy_consumer_pod.sh (run it as `scripts/deploy_consumer_pod.sh
+# coco`) — don't apply this file directly with kubectl, it's a template.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -19,10 +23,11 @@ metadata:
   labels:
     app: confidential-model-consumer-coco
   annotations:
-    # Configures the attestation agent's key broker client. Replace the
-    # host:port with the KBS Service address from
-    # scripts/deploy_coco_kbs.sh's output.
-    io.katacontainers.config.agent.aa_kbc_params: "cc_kbc::http://kbs.confidential-containers-system.svc.cluster.local:8080"
+    # Configures the attestation agent's key broker client. KBS_NAMESPACE
+    # must match the namespace scripts/deploy_coco_kbs.sh actually deployed
+    # KBS into (it prints this; defaults to coco-tenant, not the operator's
+    # own confidential-containers-system namespace).
+    io.katacontainers.config.agent.aa_kbc_params: "cc_kbc::http://kbs.${KBS_NAMESPACE}.svc.cluster.local:8080"
 spec:
   runtimeClassName: kata-qemu-coco-dev
   restartPolicy: Never
@@ -32,7 +37,7 @@ spec:
       imagePullPolicy: IfNotPresent
       env:
         - name: HF_REPO_ID
-          value: "<your-hf-username>/bert-tiny-encrypted"
+          value: "${HF_REPO_ID}"
         - name: HF_REPO_TYPE
           value: "model"
         - name: HF_MODEL_ID
