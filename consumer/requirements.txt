@@ -1,4 +1,7 @@
 huggingface_hub>=0.24
 cryptography>=41
-transformers>=4.40
+# <5: transformers v5 dropped the legacy WordPiece slow tokenizer, so it
+# can't build a fast tokenizer for bert-tiny (which ships only vocab.txt,
+# no tokenizer.json) without sentencepiece/tiktoken, which don't apply here.
+transformers>=4.40,<5
 torch>=2.2
