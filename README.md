@@ -61,8 +61,19 @@ ready if asked "where's X":
 - **Producer** (runs locally or as a one-shot container, not in the
   cluster): Python 3.11+ and `pip install -r producer/requirements.txt`,
   or Docker to build/run `producer/Dockerfile` instead. A Hugging Face
-  account and a `HF_TOKEN` with write access to the destination repo
-  (create one at https://huggingface.co/settings/tokens).
+  account, plus:
+  - **`HF_TOKEN`**: create one at https://huggingface.co/settings/tokens
+    with the **"Write"** role (or, for a fine-grained token, at least
+    "Create repos" and "Write access to contents" on the destination
+    repo). A read-only token fails with `403 Forbidden` the moment the
+    producer tries to create/push to the repo.
+  - **`HF_USERNAME`**: your account name, with the **exact casing**
+    Hugging Face has on file for it. A mismatch (e.g. exporting
+    `Alice` when the account is actually `alice`) also fails with
+    `403 Forbidden` on repo creation, since the Hub matches the
+    destination namespace against the authenticated user exactly. If
+    unsure, check `huggingface_hub.HfApi().whoami()["name"]` with your
+    token loaded.
 - **Consumer**: Docker to build `consumer/Dockerfile`, and a Kubernetes
   cluster (`kubectl` configured against it — any conformant cluster works
   for Layer 1: kind, minikube, EKS/GKE/AKS, etc.). If you're using a local
@@ -150,6 +161,15 @@ base64 decryption key to `secrets/decryption-key.b64` (git-ignored; with
 the container form, the volume mount is what gets it back onto the host).
 Pass `--skip-push` to exercise the download/encrypt steps without needing
 a Hub token (e.g. for local testing).
+
+**The Hub repo is not static — re-running the producer overwrites it.**
+Every run generates a **fresh** AES-256-GCM decryption key and
+re-encrypts the model with it, then overwrites `model.tar.gz.enc` and
+`manifest.json` at the same Hub path. If you re-run the producer, you
+must re-run `scripts/create_k8s_secret.sh` with the new
+`secrets/decryption-key.b64` **before** redeploying the consumer pod, or
+it will fail to decrypt (the old key against the new ciphertext raises
+`InvalidTag`).
 
 ### 2. Store the key as a Kubernetes Secret
 
