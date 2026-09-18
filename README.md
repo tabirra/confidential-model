@@ -50,6 +50,7 @@ scripts/create_k8s_secret.sh     Creates the Secret from the key file the produc
 scripts/deploy_consumer_pod.sh   Renders k8s/consumer-pod.yaml with envsubst and applies it (L1)
 scripts/deploy_coco_kbs.sh       Installs the CoCo operator + Trustee KBS, sets up the
                                   kata-qemu-coco-dev runtime class (L3)
+scripts/generate_kbs_admin_token.sh  Signs a KBS admin bearer JWT with kbs/kbs-admin.key (L3)
 scripts/set_kbs_resource_policy.sh  Uploads kbs/resource-policy.rego to KBS (L3)
 scripts/push_key_to_kbs.sh       Pushes the decryption key into KBS via kbs-client set-resource (L3)
 scripts/build_producer_image.sh  Builds the producer image
@@ -72,14 +73,22 @@ tests/test_kbs_fetch.py          Local test of the CDH fetch path against a mock
   able to talk to the daemon without `sudo` — add it to the `docker` group
   (`sudo usermod -aG docker $USER`, then log out/in or run `newgrp docker`
   for it to take effect) or run Docker rootless.
-- **Consumer — Layer 3**: additionally requires a cluster whose nodes
-  support Kata Containers (bare-metal or nested-virtualization-capable
-  nodes — Kata needs to launch real QEMU VMs, which most managed
+- **Consumer — Layer 3**: additionally requires cluster-admin access to
+  install the CoCo operator and Trustee KBS (`scripts/deploy_coco_kbs.sh`
+  — this part works fine on a `kind`/minikube dev cluster with a
+  `containerd` runtime; it's Kata's own microVMs that need real or nested
+  KVM), and the `kbs-client` CLI built locally to push the key and set the
+  resource policy:
+  ```bash
+  git clone https://github.com/confidential-containers/trustee.git
+  cd trustee && cargo build --release -p kbs-client
+  # binary at target/release/kbs-client
+  ```
+  Actually launching a `kata-qemu-coco-dev` pod needs a cluster whose
+  nodes support Kata Containers (bare-metal or nested-virtualization
+  -capable nodes — Kata needs to launch real QEMU VMs, which most managed
   Kubernetes node pools and plain `kind`/`minikube` don't support out of
-  the box), the [`kbs-client`](https://github.com/confidential-containers/trustee)
-  CLI built locally to push the key and set the resource policy, and
-  cluster-admin access to install the CoCo operator and Trustee KBS
-  (`scripts/deploy_coco_kbs.sh`).
+  the box).
 - If you're using a local kind/minikube cluster for Layer 1,
   `scripts/build_consumer_image.sh` will load the image into it
   automatically; otherwise (and always for Layer 3, since it needs a
@@ -164,10 +173,18 @@ Caveats specific to this implementation:
   `scripts/deploy_coco_kbs.sh`, `scripts/push_key_to_kbs.sh`, and
   `scripts/set_kbs_resource_policy.sh` move between releases; the scripts
   are commented accordingly and point at the upstream repos to confirm
-  against.
+  against. As of the `main` branch these scripts were last verified
+  against: KBS auth is a `role: admin` JWT bearer token (`--admin-token-file`,
+  see `scripts/generate_kbs_admin_token.sh`), not a raw private key file;
+  the `CcRuntime` CRD nests runtime config under `spec.config` (not
+  `spec.ccRuntimeConfig`) and requires a `pulltype` per runtime class; and
+  Trustee's KBS kustomize base deploys into the `coco-tenant` namespace.
+  Rego policies also need `import rego.v1` syntax (`allow if { ... }`,
+  `default allow := false`) — `kbs/resource-policy.rego` already uses it.
 - Trustee KBS's own admin access (who can push resources / set policy) is
-  itself a trust root — protect `KBS_AUTH_PRIVATE_KEY` at least as
-  carefully as the Layer 1 decryption key.
+  itself a trust root — protect `kbs/kbs-admin.key` (and any
+  `KBS_ADMIN_TOKEN_FILE` signed with it) at least as carefully as the
+  Layer 1 decryption key.
 
 ## Build and deploy the full pipeline
 
@@ -235,14 +252,22 @@ convention.
 ### 2b. Layer 3: attested key release via Kata+CoCo/KBS instead
 
 ```bash
-# One-time cluster setup: CoCo operator + Trustee KBS + kata-qemu-coco-dev
-# runtime class. Requires a cluster whose nodes support Kata containers.
+# One-time cluster setup: cert-manager + CoCo operator + Trustee KBS +
+# kata-qemu-coco-dev runtime class. Generates kbs/kbs-admin.key (the KBS
+# admin signing key) if it doesn't already exist.
 scripts/deploy_coco_kbs.sh
 
+# Turn that admin key into a bearer token kbs-client can use (KBS
+# authenticates admin requests via a JWT signed with kbs-admin.key, not
+# the key file directly).
+scripts/generate_kbs_admin_token.sh kbs/kbs-admin.key kbs/admin-token
+
 # Point these at the KBS the previous step deployed (see its printed
-# "Next steps" for how to find them).
-export KBS_URL=http://kbs.confidential-containers-system.svc.cluster.local:8080
-export KBS_AUTH_PRIVATE_KEY=./kbs/kbs-admin.key
+# "Next steps" for how to find them — the namespace defaults to
+# coco-tenant, not confidential-containers-system, as of Trustee's
+# current kustomize base).
+export KBS_URL=http://kbs.coco-tenant.svc.cluster.local:8080
+export KBS_ADMIN_TOKEN_FILE=kbs/admin-token
 
 scripts/set_kbs_resource_policy.sh kbs/resource-policy.rego
 scripts/push_key_to_kbs.sh secrets/decryption-key.b64 default/key/my-model
@@ -338,3 +363,27 @@ kubectl logs -f pod/confidential-model-consumer-coco
    allow = false` with no matching rule, re-uploading it with
    `scripts/set_kbs_resource_policy.sh`, and confirming the same pod that
    worked before now fails the CDH fetch.)
+
+5. **Validating the KBS/attestation half without a real Kata guest.** The
+   `kata-qemu-coco-dev` runtime needs a cluster whose nodes can actually
+   launch Kata's QEMU microVMs — real hardware, or a VM with only a
+   single level of virtualization between it and the physical CPU. In a
+   dev sandbox that's already itself a VM (so Kata's guest would be a
+   *second* nested level), `containerd-shim-kata-v2` may launch its QEMU
+   sandbox successfully (confirmed via QMP: vCPU state `running`) but
+   never manage to connect to the guest's vsock — `EHOSTUNREACH` at the
+   host-kernel level, persisting for the full dial timeout, despite the
+   exact same CID/vhost-fd handoff pattern working fine when reproduced
+   manually outside `containerd-shim-kata-v2`. If you hit this, you can
+   still validate everything except the guest boot itself directly
+   against KBS with `kbs-client` (built from
+   `confidential-containers/trustee`, `tools/kbs-client`):
+   ```bash
+   kbs-client --url "$KBS_URL" get-resource --path default/key/my-model
+   ```
+   This drives the real RCAR attestation handshake (falling back to the
+   "Sample Attester" when no TEE hardware is present) against the real
+   deployed KBS and the real `kbs/resource-policy.rego`, and returns the
+   real key pushed by `scripts/push_key_to_kbs.sh` — proving the
+   attestation-gated release path end to end, independently of whether a
+   Kata guest can boot in your environment.

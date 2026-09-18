@@ -16,3 +16,5 @@ notas.txt
 # KBS admin credentials (Layer 3) — never commit these
 kbs/*.key
 kbs/kbs-admin*
+kbs/admin-token
+kbs/*.pem
