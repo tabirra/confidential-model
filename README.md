@@ -216,8 +216,9 @@ convention.
    byte or a wrong key raises `InvalidTag` instead of silently returning
    corrupted data — i.e. tampering and wrong-key use are both detected.
 
-2. **End to end** — after `kubectl apply -f k8s/consumer-pod.yaml`, tail
-   the logs:
+2. **End to end** — after `HF_USERNAME=<your-hf-username>
+   scripts/deploy_consumer_pod.sh` (see step 3 above — `k8s/consumer-pod.yaml`
+   is a template, don't `kubectl apply` it directly), tail the logs:
 
    ```bash
    kubectl logs -f pod/confidential-model-consumer
