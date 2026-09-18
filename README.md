@@ -80,6 +80,10 @@ tests/test_kbs_fetch.py          Local test of the CDH fetch path against a mock
 - **Consumer — Layers 1 & 2**: Docker to build `consumer/Dockerfile`, and
   any conformant Kubernetes cluster (`kubectl` configured against it: kind,
   minikube, EKS/GKE/AKS, etc.).
+- **Docker permissions**: whichever step uses Docker, your user needs to be
+  able to talk to the daemon without `sudo` — add it to the `docker` group
+  (`sudo usermod -aG docker $USER`, then log out/in or run `newgrp docker`
+  for it to take effect) or run Docker rootless.
 - **Consumer — Layer 3**: additionally requires a cluster whose nodes
   support Kata Containers (bare-metal or nested-virtualization-capable
   nodes — Kata needs to launch real QEMU VMs, which most managed
