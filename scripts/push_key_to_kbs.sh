@@ -23,6 +23,8 @@
 # must be set to.
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
 KEY_FILE="${1:-secrets/decryption-key.b64}"
 RESOURCE_PATH="${2:-default/key/my-model}"
 KBS_URL="${KBS_URL:?set KBS_URL to the Trustee KBS address, e.g. http://kbs.coco-tenant.svc.cluster.local:8080}"

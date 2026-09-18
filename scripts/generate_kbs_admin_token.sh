@@ -8,6 +8,8 @@
 # Usage: scripts/generate_kbs_admin_token.sh [private-key-file] [output-file] [validity-seconds]
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
 KEY_FILE="${1:-kbs/kbs-admin.key}"
 OUT_FILE="${2:-kbs/admin-token}"
 VALIDITY_SECS="${3:-315360000}" # ~10 years, matching Trustee's own quickstart example

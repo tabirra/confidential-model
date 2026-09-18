@@ -14,6 +14,8 @@
 # Generate KBS_ADMIN_TOKEN_FILE with scripts/generate_kbs_admin_token.sh.
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
 POLICY_FILE="${1:-kbs/resource-policy.rego}"
 KBS_URL="${KBS_URL:?set KBS_URL to the Trustee KBS address, e.g. http://kbs.coco-tenant.svc.cluster.local:8080}"
 KBS_ADMIN_TOKEN_FILE="${KBS_ADMIN_TOKEN_FILE:?set KBS_ADMIN_TOKEN_FILE to a token from scripts/generate_kbs_admin_token.sh}"
