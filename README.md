@@ -46,6 +46,10 @@ tests/test_crypto_utils.py   Local round-trip + tamper-detection test for the cr
   kind/minikube cluster, `scripts/build_consumer_image.sh` will load the
   image into it automatically; otherwise push the image to a registry your
   cluster can pull from and update `image:` in `k8s/consumer-pod.yaml`.
+- **Docker permissions**: whichever step uses Docker, your user needs to be
+  able to talk to the daemon without `sudo` — add it to the `docker` group
+  (`sudo usermod -aG docker $USER`, then log out/in or run `newgrp docker`
+  for it to take effect) or run Docker rootless.
 - Python 3.11+ locally if you want to run the offline test suite
   (`pip install pytest` in addition to the producer requirements).
 
