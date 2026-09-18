@@ -6,9 +6,9 @@ an open model and publishes the artifacts to the Hugging Face Hub; a
 signature, decrypts with a key mounted from a Kubernetes Secret, and loads
 the model.
 
-- **Layer 1 (required)**: encrypted distribution — AES-256-GCM, key via
+- **Layer 1**: encrypted distribution — AES-256-GCM, key via
   Kubernetes Secret.
-- **Layer 2 (optional)**: model signing & verification — Ed25519, public
+- **Layer 2**: model signing & verification — Ed25519, public
   key via Kubernetes ConfigMap, verified *before* decryption.
 
 ```
