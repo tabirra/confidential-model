@@ -26,8 +26,9 @@ producer/Dockerfile          Container image for the producer (a one-shot job, n
 consumer/decrypt_and_load.py Downloads the ciphertext, decrypts with the mounted key, loads the model
 consumer/Dockerfile          Container image for the consumer pod
 k8s/secret.example.yaml      Documents the Secret shape (not a real secret)
-k8s/consumer-pod.yaml        Pod that mounts the Secret and runs the consumer
+k8s/consumer-pod.yaml        Pod template (${HF_REPO_ID}/${HF_MODEL_ID} placeholders) that mounts the Secret and runs the consumer
 scripts/create_k8s_secret.sh Creates the Secret from the key file the producer wrote
+scripts/deploy_consumer_pod.sh Renders k8s/consumer-pod.yaml with envsubst and applies it
 scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
 tests/test_crypto_utils.py   Local round-trip + tamper-detection test for the crypto helpers
@@ -144,14 +145,20 @@ after filling in a real key if you'd rather manage it declaratively.)
 scripts/build_consumer_image.sh confidential-model-consumer:latest
 ```
 
-Edit `k8s/consumer-pod.yaml`: set `HF_REPO_ID` to the repo you pushed to in
-step 1 and `HF_MODEL_ID` to the same `--model-id` you used (it must match —
-it's the AES-GCM AAD). Then:
+`k8s/consumer-pod.yaml` is a template (`${HF_REPO_ID}`/`${HF_MODEL_ID}`
+placeholders) — don't `kubectl apply` it directly. Render and deploy it with:
 
 ```bash
-kubectl apply -f k8s/consumer-pod.yaml
+HF_USERNAME=<your-hf-username> scripts/deploy_consumer_pod.sh
 kubectl logs -f pod/confidential-model-consumer
 ```
+
+`HF_MODEL_ID` defaults to `prajjwal1/bert-tiny`; override it (and it must
+match the `--model-id` used in step 1, since it's the AES-GCM AAD) with
+`HF_MODEL_ID=<model-id> HF_USERNAME=... scripts/deploy_consumer_pod.sh`, or
+set `HF_REPO_ID=<user>/<repo>` directly instead of `HF_USERNAME` if the repo
+name doesn't follow the producer's default `<model-basename>-encrypted`
+convention.
 
 ## Verifying Layer 1 works
 
@@ -192,6 +199,10 @@ kubectl logs -f pod/confidential-model-consumer
    the pod after a checksum-verified decrypt.
 
 3. **Negative test (the Secret actually matters)** — delete the Secret
-   (`kubectl delete secret model-decryption-key`) and re-run the pod; it
-   should fail fast with the `FileNotFoundError` from `load_key` rather
-   than silently proceeding, showing the consumer really depends on it.
+   (`kubectl delete secret model-decryption-key`) and re-run the pod. In
+   practice kubelet refuses to even start the container (`kubectl describe
+   pod` shows `FailedMount: secret "model-decryption-key" not found`) since
+   the volume can't be mounted; if the Secret existed but the key file
+   inside it didn't, you'd instead see the container start and fail fast
+   with the `FileNotFoundError` from `load_key`. Either way, the consumer
+   never silently proceeds without the key.

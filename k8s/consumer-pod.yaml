@@ -1,6 +1,10 @@
 # Consumer workload: mounts the decryption key from the Kubernetes Secret
 # created by scripts/create_k8s_secret.sh, downloads the encrypted model
 # artifact from the Hugging Face Hub, decrypts it, and loads it.
+#
+# ${HF_REPO_ID} and ${HF_MODEL_ID} are substituted by
+# scripts/deploy_consumer_pod.sh — don't apply this file directly with
+# kubectl, it's a template.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -15,11 +19,11 @@ spec:
       imagePullPolicy: IfNotPresent
       env:
         - name: HF_REPO_ID
-          value: "<your-hf-username>/bert-tiny-encrypted"
+          value: "${HF_REPO_ID}"
         - name: HF_REPO_TYPE
           value: "model"
         - name: HF_MODEL_ID
-          value: "prajjwal1/bert-tiny"
+          value: "${HF_MODEL_ID}"
         - name: DECRYPTION_KEY_PATH
           value: "/etc/secrets/decryption-key/key"
         # Only needed if HF_REPO_ID is a private repo.
