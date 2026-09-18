@@ -5,6 +5,8 @@
 # Usage: scripts/create_k8s_secret.sh [key-file] [secret-name] [namespace]
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
 KEY_FILE="${1:-secrets/decryption-key.b64}"
 SECRET_NAME="${2:-model-decryption-key}"
 NAMESPACE="${3:-default}"

@@ -8,6 +8,8 @@
 # Usage: scripts/create_k8s_configmap.sh [public-key-file] [configmap-name] [namespace]
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
 PUBLIC_KEY_FILE="${1:-keys/signing-public-key.pem}"
 CONFIGMAP_NAME="${2:-model-signing-public-key}"
 NAMESPACE="${3:-default}"
