@@ -5,11 +5,11 @@ an open model and publishes the artifacts to the Hugging Face Hub; a
 **consumer** running as a Kubernetes pod pulls them, verifies the
 signature, obtains the decryption key, and loads the model.
 
-- **Layer 1 (required)**: encrypted distribution — AES-256-GCM, key via
+- **Layer 1**: encrypted distribution — AES-256-GCM, key via
   Kubernetes Secret.
-- **Layer 2 (optional)**: model signing & verification — Ed25519, public
+- **Layer 2**: model signing & verification — Ed25519, public
   key via Kubernetes ConfigMap, verified *before* decryption.
-- **Layer 3 (optional, this branch)**: attested key release — the
+- **Layer 3**: attested key release — the
   Kubernetes Secret is replaced with a Kata/Confidential-Containers (CoCo)
   guest fetching the key from Trustee KBS through the in-guest Confidential
   Data Hub (CDH), only after the guest has passed remote attestation. The
