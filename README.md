@@ -34,6 +34,28 @@ scripts/build_consumer_image.sh  Builds the consumer image (and loads it into ki
 tests/test_crypto_utils.py   Local round-trip + tamper-detection test for the crypto helpers
 ```
 
+## Design decisions worth defending
+
+Two things here are deliberate, not oversights — worth having the reasoning
+ready if asked "where's X":
+
+- **The producer never runs as a Kubernetes workload.** It's a local
+  script or a one-shot Docker container that publishes to the Hub, not a
+  Pod/Job in the cluster. This matches the task's own wording (only the
+  consumer is described as "deploy a Kubernetes pod") and reflects what
+  the producer actually is — a build-time/CI publishing step, not a
+  runtime service. There's no `k8s/producer-*.yaml` because there's
+  nothing to deploy.
+- **No Kubernetes `Secret` with real data is committed.**
+  `k8s/secret.example.yaml` documents the Secret's shape (key name,
+  structure) but never contains actual key material — the real Secret is
+  created at deploy time from the locally-generated key via
+  `scripts/create_k8s_secret.sh` (a thin wrapper over `kubectl create
+  secret generic ... --from-file=`). Since this repo is public, committing
+  the real Secret would mean publishing the decryption key to the world;
+  the manifest documents the *shape* of the resource used, the value is
+  never written to git.
+
 ## Prerequisites
 
 - **Producer** (runs locally or as a one-shot container, not in the
