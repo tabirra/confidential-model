@@ -1,0 +1,31 @@
+# RBAC for the producer's optional /mermelada trigger-server mode
+# (k8s/producer-pod.yaml, producer/server.py). Grants only what
+# run_pipeline() actually needs: manage the Secret/ConfigMap it delivers
+# the key/public key through, and the consumer Pod it deploys. Namespaced
+# Role, not a ClusterRole — least privilege, scoped to wherever this is
+# applied.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: producer-trigger
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: producer-trigger
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "pods"]
+    verbs: ["get", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: producer-trigger
+subjects:
+  - kind: ServiceAccount
+    name: producer-trigger
+roleRef:
+  kind: Role
+  name: producer-trigger
+  apiGroup: rbac.authorization.k8s.io

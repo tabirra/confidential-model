@@ -47,7 +47,8 @@ signature, obtains the decryption key, and loads the model.
 common/crypto_utils.py           AES-256-GCM encrypt/decrypt helpers shared by both sides
 common/signing_utils.py          Ed25519 sign/verify + PEM key helpers shared by both sides
 producer/encrypt_and_push.py     Downloads the model, encrypts + signs it, pushes to the Hub, saves the keys
-producer/Dockerfile              Container image for the producer (a one-shot job, not a k8s workload)
+producer/server.py               Optional: runs the producer as a k8s pod, triggered by POST /mermelada
+producer/Dockerfile              Container image for the producer (one-shot by default; server.py is opt-in)
 consumer/decrypt_and_load.py     Downloads the artifact; verifies the signature; gets the decryption
                                   key via Secret (L1) or attested KBS/CDH fetch (L3); decrypts and loads
 consumer/Dockerfile              Container image for the consumer pod
@@ -56,6 +57,10 @@ k8s/configmap.example.yaml       Documents the ConfigMap shape for the signing p
 k8s/consumer-pod.yaml            Pod template (${HF_REPO_ID}/${HF_MODEL_ID} placeholders) that mounts the Secret + ConfigMap and runs the consumer (L1+L2)
 k8s/consumer-pod-coco.yaml       Pod using runtimeClassName kata-qemu-coco-dev + attested KBS/CDH key
                                   fetch instead of a Secret, still mounting the signing ConfigMap (L2+L3)
+k8s/producer-pod.yaml            Optional: pod template running producer/server.py (${HF_USERNAME}/${HF_MODEL_ID})
+k8s/producer-rbac.yaml           ServiceAccount/Role/RoleBinding producer-pod.yaml needs (manage the
+                                  Secret/ConfigMap it delivers the key through + the consumer Pod it deploys)
+k8s/producer-trigger-token.example.yaml  Documents the shape of the /mermelada bearer-token Secret
 kbs/resource-policy.rego         Permissive KBS resource policy for sample TEE attestation (L3)
 scripts/create_k8s_secret.sh     Creates the Secret from the key file the producer wrote (L1)
 scripts/create_k8s_configmap.sh  Creates the ConfigMap from the public key file the producer wrote (L2)
@@ -67,9 +72,13 @@ scripts/set_kbs_resource_policy.sh  Uploads kbs/resource-policy.rego to KBS (L3)
 scripts/push_key_to_kbs.sh       Pushes the decryption key into KBS via kbs-client set-resource (L3)
 scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
+scripts/generate_producer_trigger_token.sh  Generates the /mermelada bearer token locally (optional)
+scripts/create_producer_trigger_secret.sh   Stores that token as a Kubernetes Secret (optional)
+scripts/deploy_producer_pod.sh   Renders + applies k8s/producer-pod.yaml and k8s/producer-rbac.yaml (optional)
 tests/test_crypto_utils.py       Round-trip + tamper-detection tests for the AES-GCM helpers
 tests/test_signing_utils.py      Round-trip + tamper/wrong-key-detection tests for the signing helpers
 tests/test_kbs_fetch.py          Local test of the CDH fetch path against a mock HTTP server (L3)
+tests/test_producer_server.py    Local test of the /mermelada auth gate and routing (mocks the pipeline)
 ```
 
 ## Design decisions worth defending
@@ -77,13 +86,18 @@ tests/test_kbs_fetch.py          Local test of the CDH fetch path against a mock
 Two things here are deliberate, not oversights — worth having the reasoning
 ready if asked "where's X":
 
-- **The producer never runs as a Kubernetes workload.** It's a local
-  script or a one-shot Docker container that publishes to the Hub, not a
-  Pod/Job in the cluster. This matches the task's own wording (only the
-  consumer is described as "deploy a Kubernetes pod") and reflects what
-  the producer actually is — a build-time/CI publishing step, not a
-  runtime service. There's no `k8s/producer-*.yaml` because there's
-  nothing to deploy.
+- **The producer never runs as a Kubernetes workload — by default.** It's
+  a local script or a one-shot Docker container that publishes to the
+  Hub, not a Pod/Job in the cluster. This matches the task's own wording
+  (only the consumer is described as "deploy a Kubernetes pod") and
+  reflects what the producer actually is — a build-time/CI publishing
+  step, not a runtime service. This branch (`master` only) additionally
+  offers an **explicit, opt-in exception**: `producer/server.py`, deployed
+  via `k8s/producer-pod.yaml`, runs the producer as a long-lived pod that
+  waits for an authenticated `POST /mermelada` instead of a human running
+  the steps by hand — see "Optional: trigger the producer via a signal"
+  below. It coexists with, and doesn't replace, the default flow above;
+  nothing about the default one-shot path changes.
 - **No Kubernetes `Secret` with real data is committed.**
   `k8s/secret.example.yaml` documents the Secret's shape (key name,
   structure) but never contains actual key material — the real Secret is
@@ -333,6 +347,53 @@ you're using — `scripts/create_k8s_secret.sh` (Layer 1) and/or
 `secrets/decryption-key.b64` **before** redeploying the consumer pod, or
 it will fail to decrypt (the old key against the new ciphertext raises
 `InvalidTag`).
+
+### 1b. Optional: trigger the producer via a signal instead
+
+An alternative to running the producer by hand (step 1): deploy it as a
+pod that stays up and runs the full pipeline — encrypt, sign, push,
+deliver the key + public key, and deploy the consumer pod — whenever it
+receives an authenticated `POST /mermelada`. This is an **opt-in
+exception** to this project's default "producer isn't a k8s workload"
+design (see "Design decisions worth defending" above) and only covers the
+Secret+ConfigMap (Layer 1+2) consumer path — it does not attempt to
+deploy or drive the Kata/CoCo (Layer 3) one, which needs manual,
+environment-specific cluster setup.
+
+```bash
+# One-time: a random bearer token, stored as a Kubernetes Secret. The
+# request must present it via `Authorization: Bearer <token>` — anyone
+# without it gets 401.
+scripts/generate_producer_trigger_token.sh
+scripts/create_producer_trigger_secret.sh
+
+# Build the producer image (same image as step 1; producer/server.py is
+# just an alternate entrypoint it also ships) and deploy the pod. Applies
+# k8s/producer-rbac.yaml too — the ServiceAccount this pod runs as, scoped
+# to only what it needs (manage the Secret/ConfigMap it delivers the key
+# through, and the consumer Pod it deploys).
+scripts/build_producer_image.sh confidential-model-producer:latest
+# (load it into your kind/minikube cluster the same way as the consumer
+# image, if applicable — see scripts/build_consumer_image.sh)
+HF_USERNAME=<your-hf-username> scripts/deploy_producer_pod.sh
+```
+
+Trigger it:
+
+```bash
+kubectl port-forward pod/confidential-model-producer-trigger 8080:8080 &
+curl -X POST --max-time 300 \
+  -H "Authorization: Bearer $(cat secrets/producer-trigger-token.b64)" \
+  http://127.0.0.1:8080/mermelada
+```
+
+The request stays open until the whole pipeline finishes (roughly a
+minute or two, mostly the Hub download/upload) and returns
+`{"status": "done"}`. `GET /healthz` is available for a readiness probe
+(already wired into `k8s/producer-pod.yaml`). Re-triggering re-runs
+everything from scratch — a fresh key, a fresh Hub push, and the consumer
+pod redeployed (deleted and recreated, since Pod specs are largely
+immutable) against the new artifact.
 
 ### 2. Distribute the signing public key (Layer 2, needed either way)
 

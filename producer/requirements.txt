@@ -1,2 +1,7 @@
 huggingface_hub>=0.24
 cryptography>=41
+
+# Only needed by producer/server.py, the optional /mermelada trigger-server
+# mode (master branch) — the default one-shot producer flow doesn't use these.
+kubernetes>=29
+PyYAML>=6

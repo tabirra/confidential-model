@@ -1,0 +1,55 @@
+# Optional, additional way to run the producer (master branch only): as a
+# long-lived pod that listens for an authenticated HTTP signal instead of
+# a human running producer/encrypt_and_push.py and the delivery scripts
+# by hand. This does NOT replace the documented default flow (producer as
+# a local/CI one-shot script or container — see README.md's "Design
+# decisions worth defending") — it's an opt-in alternative for master.
+#
+# POST /mermelada (with `Authorization: Bearer <token>` matching the
+# producer-trigger-token Secret — see
+# scripts/create_producer_trigger_secret.sh) runs the full pipeline and
+# deploys k8s/consumer-pod.yaml: the Secret+ConfigMap delivery path only,
+# not the Kata/CoCo one.
+#
+# ${HF_USERNAME} and ${HF_MODEL_ID} are substituted by
+# scripts/deploy_producer_pod.sh — don't apply this file directly with
+# kubectl, it's a template. Requires k8s/producer-rbac.yaml and the
+# producer-trigger-token Secret to already be applied.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: confidential-model-producer-trigger
+  labels:
+    app: confidential-model-producer-trigger
+spec:
+  serviceAccountName: producer-trigger
+  restartPolicy: Never
+  containers:
+    - name: producer
+      image: confidential-model-producer:latest
+      imagePullPolicy: IfNotPresent
+      command: ["python", "/app/producer/server.py"]
+      ports:
+        - containerPort: 8080
+      env:
+        - name: HF_USERNAME
+          value: "${HF_USERNAME}"
+        - name: HF_MODEL_ID
+          value: "${HF_MODEL_ID}"
+        # Only needed if the destination Hub repo is private.
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-hub-token
+              key: token
+              optional: true
+        - name: PRODUCER_TRIGGER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: producer-trigger-token
+              key: token
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        initialDelaySeconds: 2

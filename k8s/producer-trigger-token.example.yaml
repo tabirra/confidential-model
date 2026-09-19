@@ -1,0 +1,16 @@
+# Example/template only — do NOT put a real token in a file that gets committed.
+#
+# Prefer creating the Secret from a locally-generated token:
+#
+#   scripts/generate_producer_trigger_token.sh
+#   scripts/create_producer_trigger_secret.sh
+#
+# This file only documents the shape of the resulting Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: producer-trigger-token
+  namespace: default
+type: Opaque
+stringData:
+  token: "<random bearer token produced by scripts/generate_producer_trigger_token.sh>"
