@@ -26,18 +26,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Load only the variables this script uses (not e.g. HF_TOKEN) from .env,
-# without overriding anything already exported.
-if [[ -f .env ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(HF_USERNAME|HF_REPO_ID|HF_MODEL_ID|KBS_NAMESPACE|CONSUMER_IMAGE)=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      val="${BASH_REMATCH[2]}"
-      val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
-      [[ -n "${!key+x}" ]] || export "$key=$val"
-    fi
-  done < .env
-fi
+# shellcheck source=lib/load_env.sh
+source scripts/lib/load_env.sh
+load_env_defaults HF_USERNAME HF_REPO_ID HF_MODEL_ID KBS_NAMESPACE CONSUMER_IMAGE
 
 MODE="${1:-layer1}"
 

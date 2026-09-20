@@ -72,6 +72,8 @@ scripts/set_kbs_resource_policy.sh  Uploads kbs/resource-policy.rego to KBS (L3)
 scripts/push_key_to_kbs.sh       Pushes the decryption key into KBS via kbs-client set-resource (L3)
 scripts/build_producer_image.sh  Builds the producer image
 scripts/build_consumer_image.sh  Builds the consumer image (and loads it into kind/minikube if present)
+scripts/publish_consumer_image.sh  Builds + pushes the consumer image to a public registry and verifies anonymous pull (L3)
+scripts/lib/load_env.sh          Shared helper: reads whitelisted variables from .env without overriding the environment
 scripts/generate_producer_trigger_token.sh  Generates the /mermelada bearer token locally (optional)
 scripts/create_producer_trigger_secret.sh   Stores that token as a Kubernetes Secret (optional)
 scripts/deploy_producer_pod.sh   Renders + applies k8s/producer-pod.yaml and k8s/producer-rbac.yaml (optional)
@@ -454,8 +456,8 @@ render and apply it with `scripts/deploy_consumer_pod.sh coco` instead of
 `kubectl apply -f` directly:
 
 ```bash
-docker build -f consumer/Dockerfile -t ghcr.io/<user>/confidential-model-consumer:latest .
-docker push ghcr.io/<user>/confidential-model-consumer:latest
+docker login ghcr.io -u <user>   # classic PAT with write:packages
+scripts/publish_consumer_image.sh ghcr.io/<user>/confidential-model-consumer:latest
 HF_USERNAME=<your-hf-username> KBS_NAMESPACE=coco-tenant \
 CONSUMER_IMAGE=ghcr.io/<user>/confidential-model-consumer:latest \
   scripts/deploy_consumer_pod.sh coco
@@ -466,6 +468,14 @@ kubectl logs -f pod/confidential-model-consumer-coco
 `HF_MODEL_ID`, `KBS_NAMESPACE` and `CONSUMER_IMAGE` from the git-ignored
 `.env` file (plain `KEY=value` lines); variables already set in the
 environment take precedence.
+
+`scripts/publish_consumer_image.sh` builds the consumer image, pushes it, and
+then checks that it can be pulled **anonymously over publicly-trusted TLS**
+(the registry-API check the guest effectively performs), failing with a
+hint if not. On ghcr.io a new package starts private and can only be made
+public from the GitHub web UI, so the first run typically pushes, reports
+the pending visibility change, and passes on a re-run after you flip it. The
+image defaults to `$CONSUMER_IMAGE` (environment or `.env`).
 
 `CONSUMER_IMAGE` is required in `coco` mode. Unlike Layer 1, the Kata guest
 VM pulls the image itself (via the nydus snapshotter and the in-guest CDH),
