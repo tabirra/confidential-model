@@ -324,11 +324,29 @@ render and apply it with `scripts/deploy_consumer_pod.sh coco` instead of
 `kubectl apply -f` directly:
 
 ```bash
-scripts/build_consumer_image.sh confidential-model-consumer:latest
+docker build -f consumer/Dockerfile -t ghcr.io/<user>/confidential-model-consumer:latest .
+docker push ghcr.io/<user>/confidential-model-consumer:latest
 HF_USERNAME=<your-hf-username> KBS_NAMESPACE=coco-tenant \
+CONSUMER_IMAGE=ghcr.io/<user>/confidential-model-consumer:latest \
   scripts/deploy_consumer_pod.sh coco
 kubectl logs -f pod/confidential-model-consumer-coco
 ```
+
+`CONSUMER_IMAGE` is required in `coco` mode. Unlike Layer 1, the Kata guest
+VM pulls the image itself (via the nydus snapshotter and the in-guest CDH),
+so a local/minikube-loaded image doesn't work. Requirements verified
+end to end:
+
+- The image must be in a registry the guest can reach anonymously with
+  publicly-trusted TLS (e.g. a **public** ghcr.io package — a private one
+  returns 403).
+- The guest unpacks the image into its own RAM, so the guest memory must
+  exceed the unpacked image size. The consumer image (~1.7 GB unpacked)
+  needs `default_memory = 4096` (MB) or more in the Kata config
+  (`configuration-qemu-coco-dev.toml`); 512/2048 MB fail with
+  `Failed to unpack layer`. On minikube, the node container's own memory
+  limit must be raised accordingly (e.g. `docker update --memory 7g
+  --memory-swap 7g <node-container>`).
 
 `KBS_NAMESPACE` must match whatever `scripts/deploy_coco_kbs.sh` printed
 for your cluster (its "Next steps" output) — it defaults to `coco-tenant`,
