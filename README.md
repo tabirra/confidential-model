@@ -332,6 +332,11 @@ CONSUMER_IMAGE=ghcr.io/<user>/confidential-model-consumer:latest \
 kubectl logs -f pod/confidential-model-consumer-coco
 ```
 
+`scripts/deploy_consumer_pod.sh` also reads `HF_USERNAME`, `HF_REPO_ID`,
+`HF_MODEL_ID`, `KBS_NAMESPACE` and `CONSUMER_IMAGE` from the git-ignored
+`.env` file (plain `KEY=value` lines); variables already set in the
+environment take precedence.
+
 `CONSUMER_IMAGE` is required in `coco` mode. Unlike Layer 1, the Kata guest
 VM pulls the image itself (via the nydus snapshotter and the in-guest CDH),
 so a local/minikube-loaded image doesn't work. Requirements verified

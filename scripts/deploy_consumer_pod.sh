@@ -18,9 +18,26 @@
 # confidential-containers-system namespace). The KBS_RESOURCE_PATH the pod
 # fetches from must separately match the --path used with
 # scripts/push_key_to_kbs.sh (both default to default/key/my-model).
+#
+# HF_USERNAME, HF_REPO_ID, HF_MODEL_ID, KBS_NAMESPACE and CONSUMER_IMAGE can
+# also be set in a git-ignored .env file at the repo root (KEY=value lines).
+# Variables already set in the environment take precedence over .env.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Load only the variables this script uses (not e.g. HF_TOKEN) from .env,
+# without overriding anything already exported.
+if [[ -f .env ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*(HF_USERNAME|HF_REPO_ID|HF_MODEL_ID|KBS_NAMESPACE|CONSUMER_IMAGE)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      val="${BASH_REMATCH[2]}"
+      val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+      [[ -n "${!key+x}" ]] || export "$key=$val"
+    fi
+  done < .env
+fi
 
 MODE="${1:-layer1}"
 
