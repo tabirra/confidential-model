@@ -4,9 +4,12 @@
 # - runtimeClassName selects the kata-qemu-coco-dev runtime class
 #   installed by scripts/deploy_coco_kbs.sh, so this pod runs inside a
 #   Kata/CoCo confidential VM instead of a regular container.
-# - The io.katacontainers.config.agent.aa_kbc_params annotation tells the
-#   in-guest attestation agent which KBS to attest against and how
-#   (cc_kbc::<KBS URL>).
+# - The io.katacontainers.config.hypervisor.kernel_params annotation passes
+#   agent.aa_kbc_params=cc_kbc::<KBS URL> on the guest kernel command line,
+#   telling the in-guest attestation agent which KBS to attest against.
+#   (The io.katacontainers.config.agent.aa_kbc_params annotation does NOT
+#   work on the Kata build the CoCo operator installs: it's silently
+#   ignored, so CDH never contacts KBS and every fetch returns a 500.)
 # - No decryption-key Secret volume is mounted. The consumer instead
 #   fetches the key at KBS_RESOURCE_PATH from the in-guest CDH API at
 #   127.0.0.1:8006, which only responds after the guest has passed
@@ -26,8 +29,9 @@ metadata:
     # Configures the attestation agent's key broker client. KBS_NAMESPACE
     # must match the namespace scripts/deploy_coco_kbs.sh actually deployed
     # KBS into (it prints this; defaults to coco-tenant, not the operator's
-    # own confidential-containers-system namespace).
-    io.katacontainers.config.agent.aa_kbc_params: "cc_kbc::http://kbs.${KBS_NAMESPACE}.svc.cluster.local:8080"
+    # own confidential-containers-system namespace). The leading space in the
+    # value is intentional: it's appended to the kernel command line.
+    io.katacontainers.config.hypervisor.kernel_params: " agent.aa_kbc_params=cc_kbc::http://kbs.${KBS_NAMESPACE}.svc.cluster.local:8080"
 spec:
   runtimeClassName: kata-qemu-coco-dev
   restartPolicy: Never

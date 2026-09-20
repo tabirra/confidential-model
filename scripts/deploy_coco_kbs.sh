@@ -98,6 +98,7 @@ Next steps:
   3. Run scripts/set_kbs_resource_policy.sh, then scripts/push_key_to_kbs.sh
      (both also need KBS_ADMIN_TOKEN_FILE=kbs/admin-token from step 1).
   4. Point k8s/consumer-pod-coco.yaml's
-     io.katacontainers.config.agent.aa_kbc_params annotation at that same
-     KBS_URL before applying it.
+     io.katacontainers.config.hypervisor.kernel_params annotation
+     (agent.aa_kbc_params=cc_kbc::<KBS_URL>) at that same KBS_URL before
+     applying it (scripts/deploy_consumer_pod.sh coco does this for you).
 EOF

@@ -157,8 +157,9 @@ ready if asked "where's X":
   consumer pod runs under the `kata-qemu-coco-dev` RuntimeClass so its
   containers execute inside a Kata/CoCo confidential VM instead of a plain
   container. That guest's attestation agent is configured via the pod
-  annotation `io.katacontainers.config.agent.aa_kbc_params` to attest
-  against KBS; once attestation succeeds, the guest-local Confidential
+  annotation `io.katacontainers.config.hypervisor.kernel_params`
+  (`agent.aa_kbc_params=cc_kbc::<KBS URL>` on the guest kernel command
+  line) to attest against KBS; once attestation succeeds, the guest-local Confidential
   Data Hub (CDH) — reachable only from inside the VM at
   `127.0.0.1:8006/cdh/resource/...` — proxies resource fetches to KBS. The
   consumer just does an HTTP GET to that local address
