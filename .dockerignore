@@ -1,0 +1,12 @@
+# Keep the build context small and free of local secrets. The Dockerfiles only
+# COPY common/, consumer/ and producer/ (plus their requirements files).
+.git
+.venv
+.env
+secrets
+keys
+kbs
+notas.txt
+__pycache__
+*.pyc
+.pytest_cache
