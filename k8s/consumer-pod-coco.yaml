@@ -21,7 +21,7 @@
 #   consumer still verifies the Ed25519 signature before decrypting —
 #   attestation and signing are independent, composable checks.
 #
-# ${HF_REPO_ID} and ${KBS_NAMESPACE} are substituted by
+# ${HF_REPO_ID}, ${KBS_NAMESPACE} and ${CONSUMER_IMAGE} are substituted by
 # scripts/deploy_consumer_pod.sh (run it as `scripts/deploy_consumer_pod.sh
 # coco`) — don't apply this file directly with kubectl, it's a template.
 apiVersion: v1
@@ -42,8 +42,11 @@ spec:
   restartPolicy: Never
   containers:
     - name: consumer
-      image: confidential-model-consumer:latest
-      imagePullPolicy: IfNotPresent
+      # The guest VM pulls this image itself (nydus snapshotter), so it must
+      # be in a registry with publicly-trusted TLS that the guest can reach
+      # without credentials — a local/minikube-loaded image name won't work.
+      image: ${CONSUMER_IMAGE}
+      imagePullPolicy: Always
       env:
         - name: HF_REPO_ID
           value: "${HF_REPO_ID}"
