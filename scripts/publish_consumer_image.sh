@@ -6,14 +6,18 @@
 # self-signed registry all fail.
 #
 # Usage: scripts/publish_consumer_image.sh [<image>]
-#   <image> defaults to $CONSUMER_IMAGE (environment or .env), e.g.
+#   <image> defaults to $CONSUMER_IMAGE (environment or .env), or is built
+#   from $CONSUMER_REGISTRY (+ optional $CONSUMER_TAG), e.g.
 #   ghcr.io/<user>/confidential-model-consumer:latest
 #
-# Requires `docker login <registry>` beforehand (for ghcr.io: a classic PAT
-# with write:packages). On ghcr.io a newly created package is PRIVATE and can
-# only be made public from the GitHub web UI (Package settings -> Danger Zone
-# -> Change visibility); the anonymous-pull check at the end tells you when
-# that is still pending — make it public, then re-run this script.
+# Works with any registry that speaks the standard registry v2 API (ghcr.io,
+# quay.io, docker.io, GitLab, a self-hosted registry with a trusted TLS
+# certificate, ...). Requires `docker login <registry>` beforehand (for
+# ghcr.io: a classic PAT with write:packages). Several registries create new
+# repositories PRIVATE (ghcr.io: only changeable in the GitHub web UI,
+# Package settings -> Danger Zone -> Change visibility); the anonymous-pull
+# check at the end tells you when that is still pending — make it public,
+# then re-run this script.
 #
 # Afterwards deploy with:
 #   CONSUMER_IMAGE=<image> scripts/deploy_consumer_pod.sh coco
@@ -23,11 +27,12 @@ cd "$(dirname "$0")/.."
 
 # shellcheck source=lib/load_env.sh
 source scripts/lib/load_env.sh
-load_env_defaults CONSUMER_IMAGE
+load_env_defaults CONSUMER_IMAGE CONSUMER_REGISTRY CONSUMER_TAG
+resolve_consumer_image
 
 IMAGE="${1:-${CONSUMER_IMAGE:-}}"
 if [[ -z "$IMAGE" ]]; then
-  echo "error: pass the image as an argument or set CONSUMER_IMAGE (e.g. ghcr.io/<user>/confidential-model-consumer:latest)" >&2
+  echo "error: pass the image as an argument or set CONSUMER_IMAGE (e.g. ghcr.io/<user>/confidential-model-consumer:latest) or CONSUMER_REGISTRY (e.g. ghcr.io/<user>)" >&2
   exit 1
 fi
 
@@ -100,12 +105,33 @@ fi
 
 if [[ "$status" != "200" ]]; then
   echo "error: anonymous pull of $IMAGE failed (HTTP ${status:-none}); the Kata guest would not be able to pull it." >&2
-  if [[ "$host" == "ghcr.io" ]]; then
-    echo "  ghcr.io packages start private: open https://github.com/users/<user>/packages/container/${repo#*/}/settings" >&2
-    echo "  (or your org's equivalent), set visibility to Public, then re-run this script." >&2
-  else
-    echo "  make the repository public on $host and re-run this script." >&2
-  fi
+  case "$status" in
+    000|"")
+      echo "  could not reach $api_host over trusted TLS (self-signed/private-CA certificate, plain HTTP or unreachable host)." >&2
+      echo "  The guest needs a registry with a publicly-trusted certificate." >&2
+      ;;
+    404)
+      echo "  the repository or tag was not found on $host (was the push to a different name?)." >&2
+      ;;
+    *)
+      case "$host" in
+        ghcr.io)
+          echo "  ghcr.io packages start private: open the package settings on GitHub" >&2
+          echo "  (https://github.com/users/<user>/packages/container/${repo#*/}/settings, or your org's equivalent)," >&2
+          echo "  set visibility to Public, then re-run this script." >&2
+          ;;
+        docker.io)
+          echo "  set the Docker Hub repository to Public (Repository -> Settings -> Visibility), then re-run this script." >&2
+          ;;
+        quay.io)
+          echo "  set the Quay repository to Public (Repository Settings -> Repository Visibility), then re-run this script." >&2
+          ;;
+        *)
+          echo "  make the repository public on $host (allow anonymous pulls), then re-run this script." >&2
+          ;;
+      esac
+      ;;
+  esac
   exit 1
 fi
 
