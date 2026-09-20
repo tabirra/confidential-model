@@ -47,7 +47,7 @@ k8s/consumer-pod-coco.yaml       Pod using runtimeClassName kata-qemu-coco-dev +
                                   KBS/CDH key fetch instead of a Secret (Layer 3)
 kbs/resource-policy.rego         Permissive KBS resource policy for sample TEE attestation
 scripts/create_k8s_secret.sh     Creates the Secret from the key file the producer wrote (L1)
-scripts/deploy_consumer_pod.sh   Renders k8s/consumer-pod.yaml with envsubst and applies it (L1)
+scripts/deploy_consumer_pod.sh   Renders k8s/consumer-pod.yaml with envsubst and applies it (L1); `coco [--publish]` for L3
 scripts/deploy_coco_kbs.sh       Installs the CoCo operator + Trustee KBS, sets up the
                                   kata-qemu-coco-dev runtime class (L3)
 scripts/generate_kbs_admin_token.sh  Signs a KBS admin bearer JWT with kbs/kbs-admin.key (L3)
@@ -326,16 +326,26 @@ render and apply it with `scripts/deploy_consumer_pod.sh coco` instead of
 `kubectl apply -f` directly:
 
 ```bash
-docker login ghcr.io -u <user>   # classic PAT with write:packages
-scripts/publish_consumer_image.sh ghcr.io/<user>/confidential-model-consumer:latest
+docker login ghcr.io -u <user>   # classic PAT with write:packages (or your registry's login)
 HF_USERNAME=<your-hf-username> KBS_NAMESPACE=coco-tenant \
-CONSUMER_IMAGE=ghcr.io/<user>/confidential-model-consumer:latest \
-  scripts/deploy_consumer_pod.sh coco
+CONSUMER_REGISTRY=ghcr.io/<user> \
+  scripts/deploy_consumer_pod.sh coco --publish
 kubectl logs -f pod/confidential-model-consumer-coco
 ```
 
+`--publish` (or `PUBLISH_IMAGE=1`) makes the deploy build and push the
+consumer image first and verify it is pullable anonymously, as one step of
+the pipeline. Without it, the script only deploys an image you already
+published. Any registry works — `CONSUMER_REGISTRY=quay.io/<org>`,
+`docker.io/<user>`, a self-hosted registry with a publicly-trusted
+certificate, … — and the image becomes
+`<CONSUMER_REGISTRY>/confidential-model-consumer:<CONSUMER_TAG, default latest>`.
+To use a fully custom name, set `CONSUMER_IMAGE` instead (it wins over
+`CONSUMER_REGISTRY`). All of these can live in `.env`.
+
 `scripts/deploy_consumer_pod.sh` also reads `HF_USERNAME`, `HF_REPO_ID`,
-`HF_MODEL_ID`, `KBS_NAMESPACE` and `CONSUMER_IMAGE` from the git-ignored
+`HF_MODEL_ID`, `KBS_NAMESPACE`, `CONSUMER_IMAGE`, `CONSUMER_REGISTRY` and
+`CONSUMER_TAG` from the git-ignored
 `.env` file (plain `KEY=value` lines); variables already set in the
 environment take precedence.
 
@@ -345,7 +355,9 @@ then checks that it can be pulled **anonymously over publicly-trusted TLS**
 hint if not. On ghcr.io a new package starts private and can only be made
 public from the GitHub web UI, so the first run typically pushes, reports
 the pending visibility change, and passes on a re-run after you flip it. The
-image defaults to `$CONSUMER_IMAGE` (environment or `.env`).
+image defaults to `$CONSUMER_IMAGE` (environment or `.env`) or is derived
+from `$CONSUMER_REGISTRY`. You can also run it on its own:
+`scripts/publish_consumer_image.sh quay.io/<org>/confidential-model-consumer:latest`.
 
 `CONSUMER_IMAGE` is required in `coco` mode. Unlike Layer 1, the Kata guest
 VM pulls the image itself (via the nydus snapshotter and the in-guest CDH),

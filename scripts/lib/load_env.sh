@@ -18,3 +18,13 @@ load_env_defaults() {
     fi
   done < .env
 }
+
+# Sets CONSUMER_IMAGE when it isn't already set, from CONSUMER_REGISTRY (any
+# registry + namespace, e.g. ghcr.io/<user>, quay.io/<org>, docker.io/<user>)
+# and optional CONSUMER_TAG (default: latest). An explicit CONSUMER_IMAGE
+# always wins.
+resolve_consumer_image() {
+  if [[ -z "${CONSUMER_IMAGE:-}" && -n "${CONSUMER_REGISTRY:-}" ]]; then
+    export CONSUMER_IMAGE="${CONSUMER_REGISTRY%/}/confidential-model-consumer:${CONSUMER_TAG:-latest}"
+  fi
+}
